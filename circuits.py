@@ -1,101 +1,78 @@
-import numpy as np
 from qiskit import QuantumCircuit
 from qiskit.circuit import ParameterVector
-from utils import pauli_string_on_qubit, avg_local_xyz_op
-
+from utils import avg_z_op
 
 class QGANCircuits:
-    def __init__(self, n_qubits=3, n_layers=2):
+    def __init__(self, n_data_qubits=1, n_layers_gen=2, n_layers_disc=4):
         """
-        :param n_qubits: Number of qubits for data/generator.
-        :param n_layers: Depth of the ansatz (per circuit).
+        Implementation of QuGAN with configurable depths.
+        Paper (Sec II.E) uses Gen=2 layers, Disc=4 layers.
         """
-        self.n_qubits = n_qubits
-        self.n_layers = n_layers
+        self.n_data = n_data_qubits
+        self.n_label = 1
+        self.n_dec = 1
 
-        # We'll use an ansatz with 3 params per qubit per layer (RX, RY, RZ)
-        self.params_per_qubit = 3
+        # Generator: Acts on Label(1) + Data(n)
+        self.gen_qubits = self.n_label + self.n_data
+        self.n_layers_gen = n_layers_gen
 
-        # Calculate total parameters needed
-        self.num_params = self.n_qubits * self.n_layers * self.params_per_qubit
+        # Discriminator: Acts on Decision(1) + Label(1) + Data(n)
+        self.disc_qubits = self.n_dec + self.n_label + self.n_data
+        self.n_layers_disc = n_layers_disc
 
-        # Define Parameter Vectors
-        self.gen_params = ParameterVector("g", self.num_params)
-        self.disc_params = ParameterVector("d", self.num_params)
+        # --- Parameters ---
+        self.n_gen_params = self._count_ansatz_params(self.gen_qubits, n_layers_gen)
+        self.gen_params = ParameterVector("g", self.n_gen_params)
 
-        # Real data is also an arbitrary circuit of the same size,
-        # just with fixed random angles.
-        self.real_params = ParameterVector("r", self.num_params)
+        self.n_disc_params = self._count_ansatz_params(self.disc_qubits, n_layers_disc)
+        self.disc_params = ParameterVector("d", self.n_disc_params)
 
-        # Pre-build Circuits
-        self.measure_op = avg_local_xyz_op(n_qubits)
+        # --- Circuits ---
+        # Measure Z on Decision qubit (Q0)
+        self.measure_op = avg_z_op(total_qubits=self.disc_qubits, target_qubit=0)
 
-        self.real_disc_circuit = self._build_real_disc()
-        self.gen_disc_circuit = self._build_gen_disc()
+        self.gen_circuit = self._build_gen_ansatz()
+        self.disc_circuit = self._build_disc_ansatz()
 
-    def _add_scalable_ansatz(self, circ, params):
-        """
-        Applies a scalable layer of Rotations followed by CNOT ring.
-        """
+    def _count_ansatz_params(self, n_q, layers):
+        # Layer: RX, RZ (2n) + RZZ nearest-neighbor (n-1)
+        if n_q > 1:
+            params_per_layer = (2 * n_q) + (n_q - 1)
+        else:
+            params_per_layer = 2 * n_q
+        return params_per_layer * layers
+
+    def _add_paper_layer(self, circ, params, qubits):
+        idx = 0
+        # 1. Single Qubit Rotations (RX, RZ)
+        for q in qubits:
+            circ.rx(params[idx], q)
+            circ.rz(params[idx+1], q)
+            idx += 2
+
+        # 2. Entangling Rotations (RZZ)
+        if len(qubits) > 1:
+            for i in range(len(qubits) - 1):
+                circ.rzz(params[idx], qubits[i], qubits[i+1])
+                idx += 1
+        return idx
+
+    def _build_gen_ansatz(self):
+        circ = QuantumCircuit(self.gen_qubits)
         param_idx = 0
-
-        for layer in range(self.n_layers):
-            # 1. Rotations on all qubits
-            for q in range(self.n_qubits):
-                # Apply 3 rotations (Universal single qubit gate)
-                circ.rx(params[param_idx], q)
-                circ.ry(params[param_idx+1], q)
-                circ.rz(params[param_idx+2], q)
-                param_idx += self.params_per_qubit
-
-            # 2. Entanglement (Ring topology)
-            if self.n_qubits > 1:
-                for q in range(self.n_qubits):
-                    # Connect q to q+1 (wrapping around)
-                    target = (q + 1) % self.n_qubits
-                    circ.cx(q, target)
-
-    def _build_real_disc(self):
-        circ = QuantumCircuit(self.n_qubits)
-        self._add_scalable_ansatz(circ, self.real_params)   # Real Data
-        self._add_scalable_ansatz(circ, self.disc_params)   # Discriminator
+        for _ in range(self.n_layers_gen):
+            p_count = self._count_ansatz_params(self.gen_qubits, 1)
+            layer_params = self.gen_params[param_idx : param_idx + p_count]
+            self._add_paper_layer(circ, layer_params, list(range(self.gen_qubits)))
+            param_idx += p_count
         return circ
 
-    def _build_gen_disc(self):
-        circ = QuantumCircuit(self.n_qubits)
-        self._add_scalable_ansatz(circ, self.gen_params)    # Generator
-        self._add_scalable_ansatz(circ, self.disc_params)   # Discriminator
+    def _build_disc_ansatz(self):
+        circ = QuantumCircuit(self.disc_qubits)
+        param_idx = 0
+        for _ in range(self.n_layers_disc):
+            p_count = self._count_ansatz_params(self.disc_qubits, 1)
+            layer_params = self.disc_params[param_idx : param_idx + p_count]
+            self._add_paper_layer(circ, layer_params, list(range(self.disc_qubits)))
+            param_idx += p_count
         return circ
-
-    def get_bloch_vector_real(self, real_w_values):
-        circ = QuantumCircuit(self.n_qubits)
-        self._add_scalable_ansatz(circ, self.real_params)
-        return self._get_avg_bloch(circ, real_w_values)
-
-    def get_bloch_vector_generator(self, gen_w_values):
-        circ = QuantumCircuit(self.n_qubits)
-        self._add_scalable_ansatz(circ, self.gen_params)
-        return self._get_avg_bloch(circ, gen_w_values)
-
-    def _get_avg_bloch(self, circ, param_values_list):
-        from qiskit.quantum_info import Statevector
-
-        params_in_circ = list(circ.parameters)
-        bind = {params_in_circ[i]: param_values_list[i] for i in range(len(params_in_circ))}
-
-        sv = Statevector.from_instruction(circ.assign_parameters(bind))
-
-        blochs = []
-        for q in range(self.n_qubits):
-            Xq = pauli_string_on_qubit("X", q, self.n_qubits)
-            Yq = pauli_string_on_qubit("Y", q, self.n_qubits)
-            Zq = pauli_string_on_qubit("Z", q, self.n_qubits)
-
-            blochs.append([
-                np.real(sv.expectation_value(Xq)),
-                np.real(sv.expectation_value(Yq)),
-                np.real(sv.expectation_value(Zq))
-            ])
-
-        return np.mean(blochs, axis=0)
-

@@ -1,34 +1,22 @@
 import numpy as np
 from qiskit import QuantumCircuit
-from qiskit.quantum_info import Statevector, Pauli, SparsePauliOp
+from qiskit.quantum_info import Statevector, SparsePauliOp
 
-
-def pauli_string_on_qubit(op: str, qubit: int, n_qubits: int) -> Pauli:
-    """
-    Qiskit Pauli string convention: leftmost char is qubit n-1.
-    """
-    s = ["I"] * n_qubits
-    s[n_qubits - 1 - qubit] = op
-    return Pauli("".join(s))
-
-def expval_from_statevector(circ: QuantumCircuit, bind: dict, pauli: Pauli) -> float:
-    """
-    Executes a circuit with bound parameters and calculates expectation value.
-    """
-    # Create a copy with assigned parameters to avoid modifying the original template
+def expval_from_statevector(circ: QuantumCircuit, bind: dict, op: SparsePauliOp) -> float:
+    # Bind params
     bound_circ = circ.assign_parameters(bind, inplace=False)
+    # Evolve
     sv = Statevector.from_instruction(bound_circ)
-    return float(np.real(sv.expectation_value(pauli)))
+    # Expectation
+    return float(np.real(sv.expectation_value(op)))
 
-def prob_from_expval(expval: float) -> float:
-    """Map Z expectation in [-1,1] to probability in [0,1]."""
-    return (expval + 1.0) / 2.0
-
-def avg_local_xyz_op(n_qubits: int):
-    terms = []
-    for q in range(n_qubits):
-        for op in ["X", "Y", "Z"]:
-            s = ["I"] * n_qubits
-            s[n_qubits - 1 - q] = op
-            terms.append(("".join(s), 1.0))
-    return SparsePauliOp.from_list(terms) / (3 * n_qubits)
+def avg_z_op(total_qubits: int, target_qubit: int):
+    """
+    Returns Z operator on the target qubit, identity elsewhere.
+    Paper: Measure Z on 'Out D' register.
+    """
+    # Qiskit string order is reversed: q_n ... q_0
+    # If target is 0, Z is at the far right.
+    s = ["I"] * total_qubits
+    s[total_qubits - 1 - target_qubit] = "Z"
+    return SparsePauliOp.from_list([("".join(s), 1.0)])
