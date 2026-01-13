@@ -8,7 +8,7 @@ from gradients import RealDiscExpval, GenDiscExpval
 N_QUBITS = 3
 N_LAYERS = 3
 DISC_STEPS = 3
-STEPS = 200
+STEPS = 400
 LR = 0.01
 # ---------------------
 

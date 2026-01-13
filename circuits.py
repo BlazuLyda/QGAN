@@ -78,23 +78,24 @@ class QGANCircuits:
         return self._get_avg_bloch(circ, gen_w_values)
 
     def _get_avg_bloch(self, circ, param_values_list):
-        # We will just look at Qubit 0 for simplicity, or average over all?
-        # Let's return Qubit 0's Bloch vector to match previous behavior.
         from qiskit.quantum_info import Statevector
 
-        # Map list of values to the circuit parameters
         params_in_circ = list(circ.parameters)
         bind = {params_in_circ[i]: param_values_list[i] for i in range(len(params_in_circ))}
 
-        bound_circ = circ.assign_parameters(bind)
-        sv = Statevector.from_instruction(bound_circ)
+        sv = Statevector.from_instruction(circ.assign_parameters(bind))
 
-        X0 = pauli_string_on_qubit("X", 0, self.n_qubits)
-        Y0 = pauli_string_on_qubit("Y", 0, self.n_qubits)
-        Z0 = pauli_string_on_qubit("Z", 0, self.n_qubits)
+        blochs = []
+        for q in range(self.n_qubits):
+            Xq = pauli_string_on_qubit("X", q, self.n_qubits)
+            Yq = pauli_string_on_qubit("Y", q, self.n_qubits)
+            Zq = pauli_string_on_qubit("Z", q, self.n_qubits)
 
-        return np.array([
-            np.real(sv.expectation_value(X0)),
-            np.real(sv.expectation_value(Y0)),
-            np.real(sv.expectation_value(Z0))
-        ], dtype=float)
+            blochs.append([
+                np.real(sv.expectation_value(Xq)),
+                np.real(sv.expectation_value(Yq)),
+                np.real(sv.expectation_value(Zq))
+            ])
+
+        return np.mean(blochs, axis=0)
+
