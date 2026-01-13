@@ -1,6 +1,7 @@
 import numpy as np
 from qiskit import QuantumCircuit
-from qiskit.quantum_info import Statevector, Pauli
+from qiskit.quantum_info import Statevector, Pauli, SparsePauliOp
+
 
 def pauli_string_on_qubit(op: str, qubit: int, n_qubits: int) -> Pauli:
     """
@@ -22,3 +23,12 @@ def expval_from_statevector(circ: QuantumCircuit, bind: dict, pauli: Pauli) -> f
 def prob_from_expval(expval: float) -> float:
     """Map Z expectation in [-1,1] to probability in [0,1]."""
     return (expval + 1.0) / 2.0
+
+def avg_local_xyz_op(n_qubits: int):
+    terms = []
+    for q in range(n_qubits):
+        for op in ["X", "Y", "Z"]:
+            s = ["I"] * n_qubits
+            s[n_qubits - 1 - q] = op
+            terms.append(("".join(s), 1.0))
+    return SparsePauliOp.from_list(terms) / (3 * n_qubits)

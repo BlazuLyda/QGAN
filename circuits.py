@@ -1,93 +1,98 @@
 import numpy as np
 from qiskit import QuantumCircuit
 from qiskit.circuit import ParameterVector
-from utils import pauli_string_on_qubit
+from utils import pauli_string_on_qubit, avg_local_xyz_op
+
 
 class QGANCircuits:
-    def __init__(self, n_qubits=3):
+    def __init__(self, n_qubits=3, n_layers=2):
+        """
+        :param n_qubits: Number of qubits for data/generator.
+        :param n_layers: Depth of the ansatz (per circuit).
+        """
         self.n_qubits = n_qubits
+        self.n_layers = n_layers
+
+        # We'll use an ansatz with 3 params per qubit per layer (RX, RY, RZ)
+        self.params_per_qubit = 3
+
+        # Calculate total parameters needed
+        self.num_params = self.n_qubits * self.n_layers * self.params_per_qubit
 
         # Define Parameter Vectors
-        self.disc_params = ParameterVector("d", 9)
-        self.gen_params = ParameterVector("g", 9)
+        self.gen_params = ParameterVector("g", self.num_params)
+        self.disc_params = ParameterVector("d", self.num_params)
 
-        # Unpack the 3 parameters for real data: phi, theta, omega
-        # These are individual Parameter objects, not lists.
-        self.phi_p, self.theta_p, self.omega_p = ParameterVector("r", 3)
+        # Real data is also an arbitrary circuit of the same size,
+        # just with fixed random angles.
+        self.real_params = ParameterVector("r", self.num_params)
 
-        # Pre-build the main training circuits
+        # Pre-build Circuits
+        self.measure_op = avg_local_xyz_op(n_qubits)
+
         self.real_disc_circuit = self._build_real_disc()
         self.gen_disc_circuit = self._build_gen_disc()
 
-        # Define the measurement operator (Z on qubit 2)
-        self.measure_op = pauli_string_on_qubit("Z", qubit=2, n_qubits=n_qubits)
+    def _add_scalable_ansatz(self, circ, params):
+        """
+        Applies a scalable layer of Rotations followed by CNOT ring.
+        """
+        param_idx = 0
 
-    @staticmethod
-    def _add_real_data(circ, phi, theta, omega):
-        circ.h(0)
-        circ.rz(phi, 0)
-        circ.ry(theta, 0)
-        circ.rz(omega, 0)
+        for layer in range(self.n_layers):
+            # 1. Rotations on all qubits
+            for q in range(self.n_qubits):
+                # Apply 3 rotations (Universal single qubit gate)
+                circ.rx(params[param_idx], q)
+                circ.ry(params[param_idx+1], q)
+                circ.rz(params[param_idx+2], q)
+                param_idx += self.params_per_qubit
 
-    @staticmethod
-    def _add_generator(circ, w):
-        # w is expected to be a list/vector of 9 parameters
-        circ.h(0)
-        circ.rx(w[0], 0)
-        circ.rx(w[1], 1)
-        circ.ry(w[2], 0)
-        circ.ry(w[3], 1)
-        circ.rz(w[4], 0)
-        circ.rz(w[5], 1)
-        circ.cx(0, 1)
-        circ.rx(w[6], 0)
-        circ.ry(w[7], 0)
-        circ.rz(w[8], 0)
-
-    @staticmethod
-    def _add_discriminator(circ, w):
-        circ.h(0)
-        circ.rx(w[0], 0)
-        circ.rx(w[1], 2)
-        circ.ry(w[2], 0)
-        circ.ry(w[3], 2)
-        circ.rz(w[4], 0)
-        circ.rz(w[5], 2)
-        circ.cx(0, 2)
-        circ.rx(w[6], 2)
-        circ.ry(w[7], 2)
-        circ.rz(w[8], 2)
+            # 2. Entanglement (Ring topology)
+            if self.n_qubits > 1:
+                for q in range(self.n_qubits):
+                    # Connect q to q+1 (wrapping around)
+                    target = (q + 1) % self.n_qubits
+                    circ.cx(q, target)
 
     def _build_real_disc(self):
         circ = QuantumCircuit(self.n_qubits)
-        self._add_real_data(circ, self.phi_p, self.theta_p, self.omega_p)
-        self._add_discriminator(circ, self.disc_params)
+        self._add_scalable_ansatz(circ, self.real_params)   # Real Data
+        self._add_scalable_ansatz(circ, self.disc_params)   # Discriminator
         return circ
 
     def _build_gen_disc(self):
         circ = QuantumCircuit(self.n_qubits)
-        self._add_generator(circ, self.gen_params)
-        self._add_discriminator(circ, self.disc_params)
+        self._add_scalable_ansatz(circ, self.gen_params)    # Generator
+        self._add_scalable_ansatz(circ, self.disc_params)   # Discriminator
         return circ
 
-    def get_bloch_vector_real(self, phi, theta, omega):
-        """Helper to get Bloch vector for real data (qubit 0)."""
+    def get_bloch_vector_real(self, real_w_values):
         circ = QuantumCircuit(self.n_qubits)
-        self._add_real_data(circ, phi, theta, omega)
-        return self._get_bloch_vector(circ)
+        self._add_scalable_ansatz(circ, self.real_params)
+        return self._get_avg_bloch(circ, real_w_values)
 
-    def get_bloch_vector_generator(self, gen_w):
-        """Helper to get Bloch vector for generator (qubit 0)."""
+    def get_bloch_vector_generator(self, gen_w_values):
         circ = QuantumCircuit(self.n_qubits)
-        self._add_generator(circ, gen_w)
-        return self._get_bloch_vector(circ)
+        self._add_scalable_ansatz(circ, self.gen_params)
+        return self._get_avg_bloch(circ, gen_w_values)
 
-    def _get_bloch_vector(self, circ):
+    def _get_avg_bloch(self, circ, param_values_list):
+        # We will just look at Qubit 0 for simplicity, or average over all?
+        # Let's return Qubit 0's Bloch vector to match previous behavior.
         from qiskit.quantum_info import Statevector
-        sv = Statevector.from_instruction(circ)
+
+        # Map list of values to the circuit parameters
+        params_in_circ = list(circ.parameters)
+        bind = {params_in_circ[i]: param_values_list[i] for i in range(len(params_in_circ))}
+
+        bound_circ = circ.assign_parameters(bind)
+        sv = Statevector.from_instruction(bound_circ)
+
         X0 = pauli_string_on_qubit("X", 0, self.n_qubits)
         Y0 = pauli_string_on_qubit("Y", 0, self.n_qubits)
         Z0 = pauli_string_on_qubit("Z", 0, self.n_qubits)
+
         return np.array([
             np.real(sv.expectation_value(X0)),
             np.real(sv.expectation_value(Y0)),

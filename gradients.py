@@ -11,9 +11,13 @@ def tensor_to_bind_dict(tensor, param_vec):
     Helper to detach a tensor, convert to numpy, and zip with a ParameterVector.
     """
     values = tensor.detach().cpu().double().numpy()
-    # Create dictionary mapping parameter objects to their values
     return {param_vec[i]: values[i] for i in range(len(values))}
 
+def array_to_bind_dict(numpy_array, param_vec):
+    """
+    Helper to create a binding dictionary from a numpy array and ParameterVector.
+    """
+    return {param_vec[i]: numpy_array[i] for i in range(len(numpy_array))}
 
 def compute_parameter_shift_grads(circuit, measure_op, base_bind, target_params):
     """
@@ -45,21 +49,26 @@ class RealDiscExpval(torch.autograd.Function):
     Calculates expectation value for the Real Data + Discriminator circuit.
     """
     @staticmethod
-    def forward(ctx, disc_w, phi, theta, omega, qgan_circuits):
+    def forward(ctx, disc_w, real_data_w, qgan_circuits):
+        """
+        Computes forward pass for Real + Discriminator circuit.
+        :param ctx: Context for autograd
+        :param disc_w: Tensor of trainable Discriminator parameters
+        :param real_data_w: Tensor or float array of fixed parameters for real data
+        :param qgan_circuits: QGANCircuits object with pre-built circuits and parameters
+        :return: Expectation value as a tensor
+        """
         ctx.qgan = qgan_circuits
-        ctx.phi = float(phi)
-        ctx.theta = float(theta)
-        ctx.omega = float(omega)
 
-        # Use helper to create binding for discriminator weights
+        # Save fixed real params (as numpy) for backward
+        real_np = real_data_w.detach().cpu().numpy()
+        ctx.real_np = real_np
+
+        # Bind Discriminator (Active)
         bind = tensor_to_bind_dict(disc_w, qgan_circuits.disc_params)
 
-        # Add the fixed real-data parameters
-        bind.update({
-            qgan_circuits.phi_p: ctx.phi,
-            qgan_circuits.theta_p: ctx.theta,
-            qgan_circuits.omega_p: ctx.omega
-        })
+        # Bind Real Data (Fixed)
+        bind.update(array_to_bind_dict(real_np, qgan_circuits.real_params))
 
         f0 = expval_from_statevector(qgan_circuits.real_disc_circuit, bind, qgan_circuits.measure_op)
 
@@ -68,19 +77,20 @@ class RealDiscExpval(torch.autograd.Function):
 
     @staticmethod
     def backward(ctx, *grad_outputs):
+        """
+        Computes gradients via parameter-shift rule for Discriminator parameters.
+        :param ctx: Context with saved tensors and qgan circuits
+        :param grad_outputs: Gradient outputs from subsequent layers
+        :return: Gradients for disc_w, None for real_data_w and qgan_circuits
+        """
         grad_output = grad_outputs[0]
         (disc_w,) = ctx.saved_tensors
         qgan = ctx.qgan
+        real_np = ctx.real_np
 
-        # Reconstruct the binding dictionary
         base_bind = tensor_to_bind_dict(disc_w, qgan.disc_params)
-        base_bind.update({
-            qgan.phi_p: ctx.phi,
-            qgan.theta_p: ctx.theta,
-            qgan.omega_p: ctx.omega
-        })
+        base_bind.update(array_to_bind_dict(real_np, qgan.real_params))
 
-        # Compute gradients via parameter shift
         grads = compute_parameter_shift_grads(
             circuit=qgan.real_disc_circuit,
             measure_op=qgan.measure_op,
@@ -90,7 +100,8 @@ class RealDiscExpval(torch.autograd.Function):
 
         grad_disc = torch.from_numpy(grads).to(disc_w.device).type_as(disc_w)
 
-        return grad_disc * grad_output, None, None, None, None
+        # Return None for real_data_w and qgan_circuits
+        return grad_disc * grad_output, None, None
 
 
 class GenDiscExpval(torch.autograd.Function):
