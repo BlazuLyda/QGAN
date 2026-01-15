@@ -1,6 +1,10 @@
 from qiskit import QuantumCircuit
 from qiskit.circuit import ParameterVector
+from qiskit.circuit.library import StatePreparation
+from qiskit.quantum_info import Statevector
+from data import QuantumDataSource
 from utils import avg_z_op
+import numpy as np
 
 class Ansatz:
     @staticmethod
@@ -38,88 +42,300 @@ class Ansatz:
                     param_idx += 1
 
 class QGANCircuits:
-    def __init__(self, n_data_qubits=1, n_layers_gen=2, n_layers_disc=4):
+    """
+    QGAN circuits consisting of a data source G(enerator)/R(eal) and D(iscriminator).
+    The layouts of the circuits is presented below.
+
+    Generator - Discriminator Circuit (GD):
+    |decision> (1) ------------|^^^^^|------{ measure Z }
+    |label   > (m) ------------|  D  |--/
+    |data    > (n) ---|^^^^^|--|_____|--/
+    |label   > (m) ---|  G  |----/
+    |bath    > (k) ---|_____|----/
+
+    Real - Discriminator Circuit (RD):
+    |decision> (1) ------------|^^^^^|------{ measure Z }
+    |label   > (m) ------------|  D  |--/
+    |data    > (n) ---|^^^^^|--|_____|--/
+                      |  R  |
+                      |_____|
+    """
+
+    def __init__(
+            self,
+            real_source: QuantumDataSource,
+            n_data_qubits=1,
+            n_label_qubits=1,
+            n_bath_qubits=1,
+            n_layers_gen=2, 
+            n_layers_disc=4
+        ):
         """
         Implementation of QuGAN with configurable depths.
         Paper (Sec II.E) uses Gen=2 layers, Disc=4 layers.
         """
+        self.real_source = real_source
+
         self.n_data = n_data_qubits
-        self.n_label = 1
+        self.n_label = n_label_qubits
+        self.n_bath = n_bath_qubits
         self.n_dec = 1
 
-        # Generator: Acts on Label(1) + Data(n)
-        self.gen_qubits = self.n_label + self.n_data
+        # Offsets of the qubit registers
+        self.offsets = {
+            "dec":     0,
+            "label_d": self.n_dec,
+            "data":    self.n_dec + self.n_label,
+            "label_g": self.n_dec + self.n_label + self.n_data,
+            "bath":    self.n_dec + self.n_label + self.n_data + self.n_label,
+        }
+
+        # Generator: Acts on Label(m) + Data(n) + Entropy/Bath(k)
+        self.n_gen_qubits = self.n_label + self.n_data + self.n_bath
+        self.gen_qubits = list(range(self.offsets["data"], self.offsets["data"] + self.n_gen_qubits))
         self.n_layers_gen = n_layers_gen
 
-        # Discriminator: Acts on Decision(1) + Label(1) + Data(n)
-        self.disc_qubits = self.n_dec + self.n_label + self.n_data
+        # Discriminator: Acts on Decision(1) + Label(m) + Data(n)
+        self.n_disc_qubits = self.n_dec + self.n_label + self.n_data
+        self.disc_qubits = list(range(self.n_disc_qubits))
         self.n_layers_disc = n_layers_disc
 
         # --- Parameters ---
-        self.n_gen_params = Ansatz.count_ansatz_params(self.gen_qubits, n_layers_gen)
-        self.gen_params = ParameterVector("g", self.n_gen_params)
+        self.n_gen_params = Ansatz.count_ansatz_params(self.n_gen_qubits, n_layers_gen)
+        self.gen_params = ParameterVector("g", self.n_gen_params) # Bindable parameters for Generator
 
-        self.n_disc_params = Ansatz.count_ansatz_params(self.disc_qubits, n_layers_disc)
-        self.disc_params = ParameterVector("d", self.n_disc_params)
+        self.n_disc_params = Ansatz.count_ansatz_params(self.n_disc_qubits, n_layers_disc)
+        self.disc_params = ParameterVector("d", self.n_disc_params) # Bindable parameters for Discriminator
 
         # --- Circuits ---
         # Measure Z on Decision qubit (Q0)
-        self.measure_op = avg_z_op(total_qubits=self.disc_qubits, target_qubit=0)
+        self.measure_op = avg_z_op(total_qubits=self.n_disc_qubits, target_qubit=0)
 
         self.gen_circuit = self._build_gen_ansatz()
         self.disc_circuit = self._build_disc_ansatz()
 
     def _build_gen_ansatz(self):
-        circ = QuantumCircuit(self.gen_qubits)
-        Ansatz.add_ansatz(list(range(self.gen_qubits)), self.n_layers_gen, circ, self.gen_params)
+        circ = QuantumCircuit(self.n_gen_qubits)
+        Ansatz.add_ansatz(list(range(self.n_gen_qubits)), self.n_layers_gen, circ, self.gen_params)
         return circ
 
     def _build_disc_ansatz(self):
-        circ = QuantumCircuit(self.disc_qubits)
-        Ansatz.add_ansatz(list(range(self.disc_qubits)), self.n_layers_disc, circ, self.disc_params)
+        circ = QuantumCircuit(self.n_disc_qubits)
+        Ansatz.add_ansatz(list(range(self.n_disc_qubits)), self.n_layers_disc, circ, self.disc_params)
         return circ
+
+    def _prepare_label_register(self, circ: QuantumCircuit, label: int, prepare_g: bool = False):
+        """
+        Convert the label to a binary string and flip all 1's using X gates.
+        There are 2 individual bath registers, one for D and one for G.
+
+        :param circ: Quantum circuit to modify
+        :type circ: QuantumCircuit
+        :param label: Numerical label to prepare
+        :type label: int
+        :param prepare_g: Whether to prepare the G label register as well
+        :type prepare_g: bool
+        """
+        bits = format(label, f"0{self.n_label}b")[::-1]
+        for i, bit in enumerate(bits):
+            if bit == "1":
+                circ.x(self.offsets["label_d"] + i)
+                if prepare_g:
+                    circ.x(self.offsets["label_g"] + i)
+
+    def _prepare_bath_register(self, circ: QuantumCircuit, rng: np.random.Generator):
+        """
+        Initialize bath qubits to random pure product states.
+        """
+        offset = self.offsets["bath"]
+
+        for q in range(self.n_bath):
+            theta = rng.uniform(0, np.pi)
+            phi = rng.uniform(0, 2 * np.pi)
+
+            circ.ry(theta, offset + q)
+            circ.rz(phi, offset + q)
+
+    def _prepare_real_data_register(self, circ: QuantumCircuit, label: int):
+        """
+        In case of Real data source, prepare the real data register.
+        """
+        sample_state = self.real_source.sample_class(label)
+        prep = StatePreparation(sample_state)
+
+        data_offset = self.offsets["data"]
+        data_qubits = list(range(data_offset, data_offset + self.n_data))
+        circ.append(prep, data_qubits)
+
+    def evaluate_RD_circuit(self, disc_bind, label: int):
+        """
+        Evaluate the Real vs Discriminator circuit and return the expectation value.
+
+        :param disc_bind: Discriminator parameter bindings
+        :type disc_bind: dict
+        :param label: Label of the class to be sampled from
+        :type label: int
+        :param rand: Optional seed for randomness
+        :type rand: int | None
+        """
+        circ = QuantumCircuit(self.n_disc_qubits)
+
+        # 1. Decision qubit is already |0>
+
+        # 2. Label register
+        self._prepare_label_register(circ, label)
+
+        # 3. Data register (Real data)
+        self._prepare_real_data_register(circ, label)
+
+        # 4. Apply Discriminator (symbolic parameters)
+        circ.compose(self.disc_circuit, inplace=True)
+
+        # 5. Bind parameters
+        bound_circ = circ.assign_parameters(disc_bind)
+
+        # 5. Exact simulation
+        state = Statevector.from_instruction(bound_circ)
+        expval = state.expectation_value(self.measure_op)
+
+        return expval.real
+
+
+    def evaluate_GD_circuit(self, gen_bind, disc_bind, label: int, rand: int | None = None):
+        """
+        Evaluate the Generator vs Discriminator circuit and return the expectation value.
+
+        :param gen_bind: Generator parameter bindings
+        :type gen_bind: dict
+        :param disc_bind: Discriminator parameter bindings
+        :type disc_bind: dict
+        :param label: Label of the class to be sampled from
+        :type label: int
+        :param rand: Optional seed for randomness
+        :type rand: int | None
+        """
+        rng = np.random.default_rng(rand)
+        circ = QuantumCircuit(self.n_disc_qubits)
+
+        # 1. Decision qubit is already |0>
+
+        # 2. Both label registers
+        self._prepare_label_register(circ, label, prepare_g=True)
+
+        # 3. Bath register (random noise)
+        self._prepare_bath_register(circ, rng)
+
+        # 4. Apply Generator (symbolic parameters)
+        circ.compose(self.gen_circuit, qubits=self.gen_qubits, inplace=True)
+
+        # 4. Apply Discriminator (symbolic parameters)
+        circ.compose(self.disc_circuit, qubits=self.disc_qubits, inplace=True)
+
+        # 5. Bind Discriminator and Generator parameters
+        bound_circ = circ.assign_parameters(disc_bind).assign_parameters(gen_bind)
+
+        # 6. Exact simulation
+        state = Statevector.from_instruction(bound_circ)
+        expval = state.expectation_value(self.measure_op)
+
+        return expval.real
 
 
 class GenCircuits:
     """
     Quantum circuit that uses the Generator unitary with supplied static parameters
     to generate artificial samples of learned data.
+
+    The Generator unitary G takes the following quantum registers with variable num of qubits:
+    1. Label register for selecting the class to generate the samples from - initialized to the label value.
+    2. Data register - initialized to zeros.
+    3. Bath register - initialized to random noise.
+
+    The size of the label and data registers is defined by the training data. The bath/entropy register's size can
+    be set to:
+    - `= n_data_qubits` - minimal expressive latent space
+    - `> n_data_qubits` - higher entropy, more expressivity
+    - `= 0` - Deterministic generator (usually not desired)
+
+    The noise type used for the Bath/Entropy register is Haar-random product state. Each qubit of the register is
+    initialized to the pure state: ∣ψ⟩ = cos(θ/2)|0⟩ + exp(iϕ) sin(θ/2)|1⟩, where parameters θ and ϕ are uniformly
+    sampled.
     """
 
-    def __init__(self, gen_params, n_qubits=3, n_layers=2):
+    def __init__(
+        self, 
+        gen_params, 
+        n_data_qubits=1, 
+        n_label_qubits=1, 
+        n_bath_qubits=1, 
+        n_layers=2
+    ):
         """
         :param gen_w: Learned parameters for generator
         :param n_qubits: Number of qubits for generator
         :param n_layers: Depth of the generator ansatz
         """
-        self.n_qubits = n_qubits
+        self.n_data = n_data_qubits
+        self.n_label = n_label_qubits
+        self.n_bath = n_bath_qubits
+
+        self.n_qubits = n_data_qubits + n_label_qubits + n_bath_qubits
         self.n_layers = n_layers
 
-        # We'll use an ansatz with 3 params per qubit per layer (RX, RY, RZ)
-        self.params_per_qubit = 3
-
-        # Calculate total parameters needed
-        self.num_params = self.n_qubits * self.n_layers * self.params_per_qubit
-
-        if self.num_params != len(gen_params):
-            raise Exception("Number of supplied parameter values doesn't match required number of params")
-
-        # Define Parameter Vectors
         self.gen_params = gen_params
         self.gen_circuit = self._build_gen()
 
     def _build_gen(self):
         circ = QuantumCircuit(self.n_qubits)
-        # add_scalable_ansatz(self.n_layers, self.n_qubits, circ, self.gen_params)    # Generator
+        Ansatz.add_ansatz(list(range(self.n_qubits)), self.n_layers, circ, self.gen_params)
         return circ
 
-    def sample_statevector(self, label: int, rand: int|None = None):
+    def _prepare_label_register(self, circ: QuantumCircuit, label: int):
         """
-        Evaluate the generator quantum circuit and return the generated result.
-        
-        :param self: Description
-        :param label: Description
+        Convert the label to a binary string and flip all 1's using X gates. 
+        """
+        bits = format(label, f"0{self.n_label}b")[::-1]
+        for i, bit in enumerate(bits):
+            if bit == "1":
+                circ.x(i)
+
+    def _prepare_bath_register(self, circ: QuantumCircuit, rng: np.random.Generator):
+        """
+        Initialize bath qubits to random pure product states.
+        """
+        offset = self.n_label + self.n_data
+
+        for q in range(self.n_bath):
+            theta = rng.uniform(0, np.pi)
+            phi = rng.uniform(0, 2 * np.pi)
+
+            circ.ry(theta, offset + q)
+            circ.rz(phi, offset + q)
+    
+    def sample_statevector(self, label: int, rand: int | None = None):
+        """
+        Evaluate the generator circuit and return the full generated statevector.
+
+        :param label: Label of the class to be sampled from
         :type label: int
-        :param rand: Description
+        :param rand: Optional seed for randomness
         :type rand: int | None
         """
+
+        rng = np.random.default_rng(rand)
+
+        circ = QuantumCircuit(self.n_qubits)
+
+        # 1. Label register
+        self._prepare_label_register(circ, label)
+
+        # 2. Data register is already |0...0⟩
+
+        # 3. Bath register (random noise)
+        self._prepare_bath_register(circ, rng)
+
+        # 4. Apply Generator
+        circ.compose(self.gen_circuit, inplace=True)
+
+        # 5. Exact simulation
+        return Statevector.from_instruction(circ)

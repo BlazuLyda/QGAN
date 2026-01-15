@@ -1,14 +1,12 @@
 import numpy as np
 from qiskit.quantum_info import Statevector
-from typing import List
-
 
 class QuantumEnsemble:
     """
     Represents a probabilistic ensemble of quantum states.
     """
 
-    def __init__(self, states: List[Statevector], probs: List[float]):
+    def __init__(self, states: list[Statevector], probs: list[float]):
         assert len(states) == len(probs), "States and probabilities must match"
         assert np.isclose(sum(probs), 1.0), "Probabilities must sum to 1"
 
@@ -30,18 +28,14 @@ class QuantumDataSource:
         self.ensembles = ensembles
         self.num_classes = len(ensembles)
 
-    def sample_class(self, lam: int):
+    def sample_class(self, lam: int) -> Statevector:
         """
         Sample from class `lam`.
 
         Args:
             lam: class index
-            return_density: if True, return density matrix instead of pure state
         """
         assert 0 <= lam < self.num_classes, "Invalid class index"
 
         ensemble = self.ensembles[lam]
         return ensemble.sample_statevector()
-
-
-
