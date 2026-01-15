@@ -67,12 +67,46 @@ class QGANCircuits:
             param_idx += p_count
         return circ
 
-    def _build_disc_ansatz(self):
-        circ = QuantumCircuit(self.disc_qubits)
-        param_idx = 0
-        for _ in range(self.n_layers_disc):
-            p_count = self._count_ansatz_params(self.disc_qubits, 1)
-            layer_params = self.disc_params[param_idx : param_idx + p_count]
-            self._add_paper_layer(circ, layer_params, list(range(self.disc_qubits)))
-            param_idx += p_count
+class GenCircuits:
+    """
+    Quantum circuit that uses the Generator unitary with supplied static parameters
+    to generate artificial samples of learned data.
+    """
+
+    def __init__(self, gen_params, n_qubits=3, n_layers=2):
+        """
+        :param gen_w: Learned parameters for generator
+        :param n_qubits: Number of qubits for generator
+        :param n_layers: Depth of the generator ansatz
+        """
+        self.n_qubits = n_qubits
+        self.n_layers = n_layers
+
+        # We'll use an ansatz with 3 params per qubit per layer (RX, RY, RZ)
+        self.params_per_qubit = 3
+
+        # Calculate total parameters needed
+        self.num_params = self.n_qubits * self.n_layers * self.params_per_qubit
+
+        if self.num_params != len(gen_params):
+            raise Exception("Number of supplied parameter values doesn't match required number of params")
+
+        # Define Parameter Vectors
+        self.gen_params = gen_params
+        self.gen_circuit = self._build_gen()
+
+    def _build_gen(self):
+        circ = QuantumCircuit(self.n_qubits)
+        add_scalable_ansatz(self.n_layers, self.n_qubits, circ, self.gen_params)    # Generator
         return circ
+
+    def sample_statevector(self, label: int, rand: int|None = None):
+        """
+        Evaluate the generator quantum circuit and return the generated result.
+        
+        :param self: Description
+        :param label: Description
+        :type label: int
+        :param rand: Description
+        :type rand: int | None
+        """
