@@ -2,6 +2,41 @@ from qiskit import QuantumCircuit
 from qiskit.circuit import ParameterVector
 from utils import avg_z_op
 
+class Ansatz:
+    @staticmethod
+    def count_ansatz_params(n_qubits, n_layers):
+        # Layer: RX, RZ (2n) + RZZ nearest-neighbor (n-1)
+        if n_qubits > 1:
+            params_per_layer = (2 * n_qubits) + (n_qubits - 1)
+        else:
+            params_per_layer = 2 * n_qubits
+        return params_per_layer * n_layers
+
+    @staticmethod
+    def add_ansatz(qubits, n_layers: int, circ: QuantumCircuit, params):
+        """
+        Add the scalable ansatz unitary with a specified number of layers
+        to the selected qubits of a quantum circuit. 
+        """
+
+        if Ansatz.count_ansatz_params(len(qubits), n_layers) != len(params):
+            raise Exception("Number of supplied parameter values doesn't match required number of params")
+
+        param_idx = 0
+        for _ in range(n_layers):
+            # 1. Single Qubit Rotations (RX, RZ)
+            for q in qubits:
+                circ.rx(params[param_idx], q)
+                param_idx += 1
+                circ.rz(params[param_idx], q)
+                param_idx += 1
+
+            # 2. Entangling Rotations (RZZ)
+            if len(qubits) > 1:
+                for i in range(len(qubits) - 1):
+                    circ.rzz(params[param_idx], qubits[i], qubits[i+1])
+                    param_idx += 1
+
 class QGANCircuits:
     def __init__(self, n_data_qubits=1, n_layers_gen=2, n_layers_disc=4):
         """
@@ -21,10 +56,10 @@ class QGANCircuits:
         self.n_layers_disc = n_layers_disc
 
         # --- Parameters ---
-        self.n_gen_params = self._count_ansatz_params(self.gen_qubits, n_layers_gen)
+        self.n_gen_params = Ansatz.count_ansatz_params(self.gen_qubits, n_layers_gen)
         self.gen_params = ParameterVector("g", self.n_gen_params)
 
-        self.n_disc_params = self._count_ansatz_params(self.disc_qubits, n_layers_disc)
+        self.n_disc_params = Ansatz.count_ansatz_params(self.disc_qubits, n_layers_disc)
         self.disc_params = ParameterVector("d", self.n_disc_params)
 
         # --- Circuits ---
@@ -34,38 +69,16 @@ class QGANCircuits:
         self.gen_circuit = self._build_gen_ansatz()
         self.disc_circuit = self._build_disc_ansatz()
 
-    def _count_ansatz_params(self, n_q, layers):
-        # Layer: RX, RZ (2n) + RZZ nearest-neighbor (n-1)
-        if n_q > 1:
-            params_per_layer = (2 * n_q) + (n_q - 1)
-        else:
-            params_per_layer = 2 * n_q
-        return params_per_layer * layers
-
-    def _add_paper_layer(self, circ, params, qubits):
-        idx = 0
-        # 1. Single Qubit Rotations (RX, RZ)
-        for q in qubits:
-            circ.rx(params[idx], q)
-            circ.rz(params[idx+1], q)
-            idx += 2
-
-        # 2. Entangling Rotations (RZZ)
-        if len(qubits) > 1:
-            for i in range(len(qubits) - 1):
-                circ.rzz(params[idx], qubits[i], qubits[i+1])
-                idx += 1
-        return idx
-
     def _build_gen_ansatz(self):
         circ = QuantumCircuit(self.gen_qubits)
-        param_idx = 0
-        for _ in range(self.n_layers_gen):
-            p_count = self._count_ansatz_params(self.gen_qubits, 1)
-            layer_params = self.gen_params[param_idx : param_idx + p_count]
-            self._add_paper_layer(circ, layer_params, list(range(self.gen_qubits)))
-            param_idx += p_count
+        Ansatz.add_ansatz(list(range(self.gen_qubits)), self.n_layers_gen, circ, self.gen_params)
         return circ
+
+    def _build_disc_ansatz(self):
+        circ = QuantumCircuit(self.disc_qubits)
+        Ansatz.add_ansatz(list(range(self.disc_qubits)), self.n_layers_disc, circ, self.disc_params)
+        return circ
+
 
 class GenCircuits:
     """
@@ -97,7 +110,7 @@ class GenCircuits:
 
     def _build_gen(self):
         circ = QuantumCircuit(self.n_qubits)
-        add_scalable_ansatz(self.n_layers, self.n_qubits, circ, self.gen_params)    # Generator
+        # add_scalable_ansatz(self.n_layers, self.n_qubits, circ, self.gen_params)    # Generator
         return circ
 
     def sample_statevector(self, label: int, rand: int|None = None):
