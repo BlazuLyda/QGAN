@@ -20,7 +20,7 @@ class Ansatz:
     def add_ansatz(qubits, n_layers: int, circ: QuantumCircuit, params):
         """
         Add the scalable ansatz unitary with a specified number of layers
-        to the selected qubits of a quantum circuit. 
+        to the selected qubits of a quantum circuit.
         """
 
         if Ansatz.count_ansatz_params(len(qubits), n_layers) != len(params):
@@ -67,7 +67,7 @@ class QGANCircuits:
             n_data_qubits=1,
             n_label_qubits=1,
             n_bath_qubits=1,
-            n_layers_gen=2, 
+            n_layers_gen=2,
             n_layers_disc=4
         ):
         """
@@ -109,7 +109,12 @@ class QGANCircuits:
 
         # --- Circuits ---
         # Measure Z on Decision qubit (Q0)
-        self.measure_op = avg_z_op(total_qubits=self.n_disc_qubits, target_qubit=0)
+        self.measure_op_rd = avg_z_op(
+            total_qubits=self.n_disc_qubits, target_qubit=0
+        )
+        self.measure_op_gd = avg_z_op(
+            total_qubits=self.n_disc_qubits + self.n_label + self.n_bath, target_qubit=0
+        )
 
         self.gen_circuit = self._build_gen_ansatz()
         self.disc_circuit = self._build_disc_ansatz()
@@ -196,7 +201,7 @@ class QGANCircuits:
 
         # 5. Exact simulation
         state = Statevector.from_instruction(bound_circ)
-        expval = state.expectation_value(self.measure_op)
+        expval = state.expectation_value(self.measure_op_rd)
 
         return expval.real
 
@@ -236,7 +241,7 @@ class QGANCircuits:
 
         # 6. Exact simulation
         state = Statevector.from_instruction(bound_circ)
-        expval = state.expectation_value(self.measure_op)
+        expval = state.expectation_value(self.measure_op_gd)
 
         return expval.real
 
@@ -263,11 +268,11 @@ class GenCircuits:
     """
 
     def __init__(
-        self, 
-        gen_params, 
-        n_data_qubits=1, 
-        n_label_qubits=1, 
-        n_bath_qubits=1, 
+        self,
+        gen_params,
+        n_data_qubits=1,
+        n_label_qubits=1,
+        n_bath_qubits=1,
         n_layers=2
     ):
         """
@@ -292,7 +297,7 @@ class GenCircuits:
 
     def _prepare_label_register(self, circ: QuantumCircuit, label: int):
         """
-        Convert the label to a binary string and flip all 1's using X gates. 
+        Convert the label to a binary string and flip all 1's using X gates.
         """
         bits = format(label, f"0{self.n_label}b")[::-1]
         for i, bit in enumerate(bits):
@@ -311,7 +316,7 @@ class GenCircuits:
 
             circ.ry(theta, offset + q)
             circ.rz(phi, offset + q)
-    
+
     def sample_statevector(self, label: int, rand: int | None = None):
         """
         Evaluate the generator circuit and return the full generated statevector.
