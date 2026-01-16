@@ -23,10 +23,15 @@ class QuantumDataSource:
     """
     Multi-class quantum data source.
     """
+    def __init__(self, n_qubits_data: int, n_qubits_label: int, ensembles: list[QuantumEnsemble]):
 
-    def __init__(self, ensembles: list[QuantumEnsemble]):
+        self.n_data = n_qubits_data
+        self.n_label = n_qubits_label
         self.ensembles = ensembles
         self.num_classes = len(ensembles)
+
+        if (2 ** n_qubits_label) < self.num_classes:
+            raise ValueError("Not enough label qubits to represent all classes.")
 
     def sample_class(self, lam: int) -> Statevector:
         """
