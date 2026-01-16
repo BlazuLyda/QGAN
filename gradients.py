@@ -1,42 +1,76 @@
 import torch
 import numpy as np
 import math
-from utils import expval_from_statevector
-from qiskit import QuantumCircuit
 import os
 from concurrent.futures import ThreadPoolExecutor
+from typing import Dict, Optional, Any, Tuple, Callable
+from qiskit.circuit import ParameterVector, Parameter
 
-SHIFT = math.pi / 2.0
+from circuits import QGANCircuits
 
-def tensor_to_bind_dict(tensor, param_vec):
+SHIFT: float = math.pi / 2.0
+
+
+def tensor_to_bind_dict(
+    tensor: torch.Tensor, param_vec: ParameterVector
+) -> Dict[Parameter, float]:
+    """
+    Maps a PyTorch tensor of values to a Qiskit Parameter dictionary.
+
+    Args:
+        tensor: The weights/parameters from the torch model.
+        param_vec: The Qiskit ParameterVector associated with these weights.
+
+    Returns:
+        A dictionary suitable for circuit.assign_parameters().
+    """
     values = tensor.detach().cpu().double().numpy()
-    return {param_vec[i]: values[i] for i in range(len(values))}
+    return {param_vec[i]: float(values[i]) for i in range(len(values))}
 
-def compute_parameter_shift_grads(circuit, measure_op, base_bind, target_params, max_workers=None):
+
+def compute_parameter_shift_grads(
+    calc_circ_expval: Callable[[Any], float],
+    base_bind: Dict[Parameter, float],
+    target_params: ParameterVector,
+    max_workers: Optional[int] = None,
+) -> np.ndarray:
+    """
+    Computes gradients for a set of parameters using the Parameter Shift Rule.
+
+    Args:
+        calc_circ_expval: Function that takes a parameter binding dictionary
+            and returns the expectation value (float).
+        base_bind: Current parameter bindings (theta).
+        target_params: The subset of parameters to compute gradients for.
+        max_workers: Number of threads for parallel evaluation.
+
+    Returns:
+        A numpy array containing partial derivatives.
+    """
     n = len(target_params)
     grads = np.zeros(n)
 
     if n == 0:
         return grads
 
-    # default: env var or cpu count
     if max_workers is None:
         max_workers = int(os.getenv("QGAN_WORKERS", "0")) or (os.cpu_count() or 1)
 
-    def one_param(i):
+    def one_param(i: int) -> Tuple[int, float]:
         param = target_params[i]
 
+        # f(theta + pi/2)
         bind_plus = base_bind.copy()
         bind_plus[param] += SHIFT
-        f_plus = expval_from_statevector(circuit, bind_plus, measure_op)
+        f_plus = calc_circ_expval(bind_plus)
 
+        # f(theta - pi/2)
         bind_minus = base_bind.copy()
         bind_minus[param] -= SHIFT
-        f_minus = expval_from_statevector(circuit, bind_minus, measure_op)
+        f_minus = calc_circ_expval(bind_minus)
 
         return i, 0.5 * (f_plus - f_minus)
 
-    # For tiny n, threading overhead can dominate
     if n < 4 or max_workers == 1:
         for i in range(n):
             _, g = one_param(i)
@@ -51,65 +85,98 @@ def compute_parameter_shift_grads(circuit, measure_op, base_bind, target_params,
 
 
 class RealDiscExpval(torch.autograd.Function):
+    """
+    Autograd interface for evaluating the Discriminator on Real data.
+    """
+
     @staticmethod
-    def forward(ctx, disc_w, qgan, label_val, real_data_fn):
+    def forward(
+        ctx: Any, disc_w: torch.Tensor, qgan: QGANCircuits, label_val: int
+    ) -> torch.Tensor:
+        """Computes the forward pass (expectation value) for Real data."""
         ctx.qgan = qgan
-        full_circ = QuantumCircuit(qgan.disc_qubits)
 
-        # 1. Encode Label on Q1
-        if label_val == 1: full_circ.x(1)
-        # 2. Encode Real Data on Q2...
-        real_qc = real_data_fn(label_val, qgan.n_data)
-        if real_qc is not None:
-            qubit_map = list(range(2, 2 + qgan.n_data))
-            full_circ.compose(real_qc, qubits=qubit_map, inplace=True)
-        # 3. Apply Discriminator
-        full_circ.compose(qgan.disc_circuit, inplace=True)
+        ctx.calc_RD_expval = qgan.prepare_RD_circuit(label_val)
 
-        ctx.circuit = full_circ
         bind = tensor_to_bind_dict(disc_w, qgan.disc_params)
-        f0 = expval_from_statevector(full_circ, bind, qgan.measure_op)
+        f0 = ctx.calc_RD_expval(bind)
 
         ctx.save_for_backward(disc_w)
         return disc_w.new_tensor(f0)
 
     @staticmethod
-    def backward(ctx, *grad_outputs):
+    def backward(
+        ctx: Any, *grad_outputs: torch.Tensor
+    ) -> Tuple[Optional[torch.Tensor], Optional[None], Optional[None]]:
+        """
+        Backward pass for Real-Discriminator circuit.
+        Returns 3 values to match forward(disc_w, qgan, label_val).
+        """
         grad_output = grad_outputs[0]
         (disc_w,) = ctx.saved_tensors
         bind = tensor_to_bind_dict(disc_w, ctx.qgan.disc_params)
-        grads = compute_parameter_shift_grads(ctx.circuit, ctx.qgan.measure_op, bind, ctx.qgan.disc_params)
+
+        grads = compute_parameter_shift_grads(
+            ctx.calc_RD_expval, bind, ctx.qgan.disc_params
+        )
+
         grad_disc = torch.from_numpy(grads).to(disc_w.device).type_as(disc_w)
-        return grad_disc * grad_output, None, None, None
+        # Returns grad for disc_w, None for qgan, None for label_val
+        return grad_disc * grad_output, None, None
+
 
 class GenDiscExpval(torch.autograd.Function):
+    """
+    Autograd interface for evaluating the Discriminator on Generated data.
+    This function primarily updates the Generator weights.
+    """
+
     @staticmethod
-    def forward(ctx, gen_w, disc_w_const, qgan, label_val):
+    def forward(
+        ctx: Any,
+        gen_w: torch.Tensor,
+        disc_w_const: torch.Tensor,
+        qgan: Any,
+        label_val: int,
+        seed: Optional[int] = None,
+    ) -> torch.Tensor:
+        """Computes the forward pass for Generated data."""
         ctx.qgan = qgan
-        full_circ = QuantumCircuit(qgan.disc_qubits)
 
-        # 1. Label Q1
-        if label_val == 1: full_circ.x(1)
-        # 2. Generator (on Q1, Q2)
-        gen_map = list(range(1, 1 + qgan.gen_qubits))
-        full_circ.compose(qgan.gen_circuit, qubits=gen_map, inplace=True)
-        # 3. Discriminator
-        full_circ.compose(qgan.disc_circuit, inplace=True)
+        rng = np.random.default_rng(seed)
+        ctx.calc_GD_expval = qgan.prepare_GD_circuit(label_val, rng)
 
-        ctx.circuit = full_circ
         bind = tensor_to_bind_dict(gen_w, qgan.gen_params)
         bind.update(tensor_to_bind_dict(disc_w_const, qgan.disc_params))
-        f0 = expval_from_statevector(full_circ, bind, qgan.measure_op)
+
+        f0 = ctx.calc_GD_expval(bind)
 
         ctx.save_for_backward(gen_w, disc_w_const)
         return gen_w.new_tensor(f0)
 
     @staticmethod
-    def backward(ctx, *grad_outputs):
+    def backward(
+        ctx: Any, *grad_outputs: torch.Tensor
+    ) -> Tuple[
+        Optional[torch.Tensor],
+        Optional[None],
+        Optional[None],
+        Optional[None],
+        Optional[None],
+    ]:
+        """
+        Backward pass for Generator-Discriminator circuit.
+        Returns 5 values to match forward(gen_w, disc_w_const, qgan, label_val, seed).
+        """
         grad_output = grad_outputs[0]
         gen_w, disc_w_const = ctx.saved_tensors
         bind = tensor_to_bind_dict(gen_w, ctx.qgan.gen_params)
         bind.update(tensor_to_bind_dict(disc_w_const, ctx.qgan.disc_params))
-        grads = compute_parameter_shift_grads(ctx.circuit, ctx.qgan.measure_op, bind, ctx.qgan.gen_params)
+
+        grads = compute_parameter_shift_grads(
+            ctx.calc_GD_expval, bind, ctx.qgan.gen_params
+        )
+
         grad_gen = torch.from_numpy(grads).to(gen_w.device).type_as(gen_w)
-        return grad_gen * grad_output, None, None, None
+        # Returns grad for gen_w, and None for all other forward inputs
+        return grad_gen * grad_output, None, None, None, None

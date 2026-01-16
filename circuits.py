@@ -172,16 +172,12 @@ class QGANCircuits:
         data_qubits = list(range(data_offset, data_offset + self.n_data))
         circ.append(prep, data_qubits)
 
-    def evaluate_RD_circuit(self, disc_bind, label: int):
+    def prepare_RD_circuit(self, label: int):
         """
         Evaluate the Real vs Discriminator circuit and return the expectation value.
 
-        :param disc_bind: Discriminator parameter bindings
-        :type disc_bind: dict
         :param label: Label of the class to be sampled from
         :type label: int
-        :param rand: Optional seed for randomness
-        :type rand: int | None
         """
         circ = QuantumCircuit(self.n_disc_qubits)
 
@@ -196,24 +192,22 @@ class QGANCircuits:
         # 4. Apply Discriminator (symbolic parameters)
         circ.compose(self.disc_circuit, inplace=True)
 
-        # 5. Bind parameters
-        bound_circ = circ.assign_parameters(disc_bind)
+        def apply(binds):
+            bound_circ = circ.assign_parameters(binds)
 
-        # 5. Exact simulation
-        state = Statevector.from_instruction(bound_circ)
-        expval = state.expectation_value(self.measure_op_rd)
+            # 5. Exact simulation
+            state = Statevector.from_instruction(bound_circ)
+            expval = state.expectation_value(self.measure_op_rd)
 
-        return expval.real
+            return expval.real
+
+        return apply
 
 
-    def evaluate_GD_circuit(self, gen_bind, disc_bind, label: int, rand: int | None = None):
+    def prepare_GD_circuit(self, label: int, rand: int | None = None):
         """
         Evaluate the Generator vs Discriminator circuit and return the expectation value.
 
-        :param gen_bind: Generator parameter bindings
-        :type gen_bind: dict
-        :param disc_bind: Discriminator parameter bindings
-        :type disc_bind: dict
         :param label: Label of the class to be sampled from
         :type label: int
         :param rand: Optional seed for randomness
@@ -236,14 +230,16 @@ class QGANCircuits:
         # 4. Apply Discriminator (symbolic parameters)
         circ.compose(self.disc_circuit, qubits=self.disc_qubits, inplace=True)
 
-        # 5. Bind Discriminator and Generator parameters
-        bound_circ = circ.assign_parameters(disc_bind).assign_parameters(gen_bind)
+        def apply(binds):
+            bound_circ = circ.assign_parameters(binds)
 
-        # 6. Exact simulation
-        state = Statevector.from_instruction(bound_circ)
-        expval = state.expectation_value(self.measure_op_gd)
+            # 5. Exact simulation
+            state = Statevector.from_instruction(bound_circ)
+            expval = state.expectation_value(self.measure_op_gd)
 
-        return expval.real
+            return expval.real
+
+        return apply
 
 
 class GenCircuits:
