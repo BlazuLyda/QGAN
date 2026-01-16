@@ -3,6 +3,7 @@ import numpy as np
 from dataclasses import dataclass
 from circuits import QGANCircuits
 from data import QuantumDataSource
+from gradients import RealDiscExpval, GenDiscExpval
 
 
 @dataclass
@@ -68,25 +69,49 @@ class TrainQGAN:
 
             # A) Train Discriminator
             for _ in range(self.config.disc_steps):
-                for _ in range(self.config.batch_size):
-                    # Comopute partial gradients of DR circuit in relation to disc_w
-                    pass
+                opt_d.zero_grad()
+                total_loss_d = 0
 
-                for _ in range(self.config.batch_size):
-                    # Compute partial gradients of DG circuit in relation to disc_w
-                    pass
+                for label in range(self.real_data.num_classes):
+                    for _ in range(self.config.batch_size):
+                        # Comopute partial gradients of DR circuit in relation to disc_w
+                        exp_real = RealDiscExpval.apply(
+                            disc_w, self.qgan, label
+                        )
+                        # Compute partial gradients of DG circuit in relation to disc_w
+                        # TODO: add rng
+                        exp_fake = GenDiscExpval.apply(
+                            gen_w.detach(), disc_w, self.qgan, label
+                        )
+
+                        # Minimax Loss D: -( E[Real] - E[Fake] )
+                        # Ideally converges to -2 (if D is perfect and G is bad) or 0 (if G is perfect)
+                        loss_d_label = -(exp_real - exp_fake)
+                        total_loss_d += loss_d_label
 
                 # Apply optimizer step for Discriminator
+                total_loss_d.backward()
+                opt_d.step()
                 # Optional tracking: save Discriminator loss after update
-
 
             # B) Train Generator
             for _ in range(self.config.gen_steps):
-                for _ in range(self.config.batch_size):
-                    # Compute partial gradients of DG circuit in relation to gen_w
-                    pass
+                opt_g.zero_grad()
+                total_loss_g = 0
+
+                for label in range(self.real_data.num_classes):
+                    for _ in range(self.config.batch_size):
+                        # Compute partial gradients of DG circuit in relation to gen_w
+                        # TODO: add rng
+                        exp_fake = GenDiscExpval.apply(gen_w, disc_w.detach(), self.qgan, label)
+
+                        # Minimax Loss G: - E[Fake]
+                        loss_g_label = -exp_fake
+                        total_loss_g += loss_g_label
 
                 # Apply optimizer step for Generator
+                total_loss_g.backward()
+                opt_g.step()
                 # Optional tracking: save Generator loss after update
 
             
