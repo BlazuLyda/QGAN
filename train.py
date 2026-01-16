@@ -32,7 +32,6 @@ class TrainQGAN:
 
         self.real_data = real_data
         self.config = config  
-        self.rng = np.random.default_rng(config.seed)
 
         self.qgan = QGANCircuits(
             real_source=real_data,
@@ -41,6 +40,7 @@ class TrainQGAN:
             n_bath_qubits=config.n_qubits_bath,
             n_layers_gen=config.n_layers_gen,
             n_layers_disc=config.n_layers_disc,
+            random=config.seed
         )
 
 
@@ -48,7 +48,6 @@ class TrainQGAN:
         """
         Main training loop for the QGAN.
         """
-
 
         # Initialize Generator and Discriminator parameters
         # Generator: Initialize closer to 0 to preserve Label early on.
@@ -65,20 +64,22 @@ class TrainQGAN:
         opt_d = torch.optim.Adam([disc_w], lr=self.config.lr_d)
 
 
+        # Main training loop
         for iteration in range(self.config.iterations):
 
             # A) Train Discriminator
             for _ in range(self.config.disc_steps):
                 opt_d.zero_grad()
-                total_loss_d = 0
+                total_loss_d = torch.tensor(0.0)
 
+                # Iterate over all classes
                 for label in range(self.real_data.num_classes):
                     for _ in range(self.config.batch_size):
-                        # Comopute partial gradients of DR circuit in relation to disc_w
+                        # Comopute single-shot gradient of DR circuit in relation to disc_w
                         exp_real = RealDiscExpval.apply(
                             disc_w, self.qgan, label
                         )
-                        # Compute partial gradients of DG circuit in relation to disc_w
+                        # Compute single-shot gradient of DG circuit in relation to disc_w
                         # TODO: add rng
                         exp_fake = GenDiscExpval.apply(
                             gen_w.detach(), disc_w, self.qgan, label
@@ -92,13 +93,16 @@ class TrainQGAN:
                 # Apply optimizer step for Discriminator
                 total_loss_d.backward()
                 opt_d.step()
-                # Optional tracking: save Discriminator loss after update
+
+            # Optional tracking: save Discriminator loss after multi-step update
+
 
             # B) Train Generator
             for _ in range(self.config.gen_steps):
                 opt_g.zero_grad()
-                total_loss_g = 0
+                total_loss_g = torch.tensor(0.0)
 
+                # Iterate over all classes
                 for label in range(self.real_data.num_classes):
                     for _ in range(self.config.batch_size):
                         # Compute partial gradients of DG circuit in relation to gen_w
@@ -112,7 +116,7 @@ class TrainQGAN:
                 # Apply optimizer step for Generator
                 total_loss_g.backward()
                 opt_g.step()
-                # Optional tracking: save Generator loss after update
+                # Optional tracking: save Generator loss after multi-step update
 
             
             # Optional tracking: compute and save cross entropy after generator update

@@ -13,9 +13,9 @@ class QuantumEnsemble:
         self.states = states
         self.probs = np.array(probs)
 
-    def sample_statevector(self) -> Statevector:
+    def sample_statevector(self, rng: np.random.Generator) -> Statevector:
         """Sample a pure state according to the ensemble distribution."""
-        idx = np.random.choice(len(self.states), p=self.probs)
+        idx = rng.choice(len(self.states), p=self.probs)
         return self.states[idx]
 
 
@@ -33,7 +33,7 @@ class QuantumDataSource:
         if (2 ** n_qubits_label) < self.num_classes:
             raise ValueError("Not enough label qubits to represent all classes.")
 
-    def sample_class(self, lam: int) -> Statevector:
+    def sample_class(self, lam: int, rng: np.random.Generator) -> Statevector:
         """
         Sample from class `lam`.
 
@@ -43,4 +43,4 @@ class QuantumDataSource:
         assert 0 <= lam < self.num_classes, "Invalid class index"
 
         ensemble = self.ensembles[lam]
-        return ensemble.sample_statevector()
+        return ensemble.sample_statevector(rng)

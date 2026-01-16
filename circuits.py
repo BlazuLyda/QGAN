@@ -68,13 +68,15 @@ class QGANCircuits:
             n_label_qubits=1,
             n_bath_qubits=1,
             n_layers_gen=2,
-            n_layers_disc=4
+            n_layers_disc=4,
+            random:int|None=None
         ):
         """
         Implementation of QuGAN with configurable depths.
         Paper (Sec II.E) uses Gen=2 layers, Disc=4 layers.
         """
         self.real_source = real_source
+        self.rng = np.random.default_rng(random)
 
         self.n_data = n_data_qubits
         self.n_label = n_label_qubits
@@ -148,15 +150,15 @@ class QGANCircuits:
                 if prepare_g:
                     circ.x(self.offsets["label_g"] + i)
 
-    def _prepare_bath_register(self, circ: QuantumCircuit, rng: np.random.Generator):
+    def _prepare_bath_register(self, circ: QuantumCircuit):
         """
         Initialize bath qubits to random pure product states.
         """
         offset = self.offsets["bath"]
 
         for q in range(self.n_bath):
-            theta = rng.uniform(0, np.pi)
-            phi = rng.uniform(0, 2 * np.pi)
+            theta = self.rng.uniform(0, np.pi)
+            phi = self.rng.uniform(0, 2 * np.pi)
 
             circ.ry(theta, offset + q)
             circ.rz(phi, offset + q)
@@ -165,7 +167,7 @@ class QGANCircuits:
         """
         In case of Real data source, prepare the real data register.
         """
-        sample_state = self.real_source.sample_class(label)
+        sample_state = self.real_source.sample_class(label, self.rng)
         prep = StatePreparation(sample_state)
 
         data_offset = self.offsets["data"]
@@ -269,13 +271,16 @@ class GenCircuits:
         n_data_qubits=1,
         n_label_qubits=1,
         n_bath_qubits=1,
-        n_layers=2
+        n_layers=2,
+        random:int|None=None
     ):
         """
         :param gen_w: Learned parameters for generator
         :param n_qubits: Number of qubits for generator
         :param n_layers: Depth of the generator ansatz
         """
+        self.rng = np.random.default_rng(random)
+
         self.n_data = n_data_qubits
         self.n_label = n_label_qubits
         self.n_bath = n_bath_qubits
@@ -300,15 +305,15 @@ class GenCircuits:
             if bit == "1":
                 circ.x(i)
 
-    def _prepare_bath_register(self, circ: QuantumCircuit, rng: np.random.Generator):
+    def _prepare_bath_register(self, circ: QuantumCircuit):
         """
         Initialize bath qubits to random pure product states.
         """
         offset = self.n_label + self.n_data
 
         for q in range(self.n_bath):
-            theta = rng.uniform(0, np.pi)
-            phi = rng.uniform(0, 2 * np.pi)
+            theta = self.rng.uniform(0, np.pi)
+            phi = self.rng.uniform(0, 2 * np.pi)
 
             circ.ry(theta, offset + q)
             circ.rz(phi, offset + q)
@@ -323,8 +328,6 @@ class GenCircuits:
         :type rand: int | None
         """
 
-        rng = np.random.default_rng(rand)
-
         circ = QuantumCircuit(self.n_qubits)
 
         # 1. Label register
@@ -333,7 +336,7 @@ class GenCircuits:
         # 2. Data register is already |0...0⟩
 
         # 3. Bath register (random noise)
-        self._prepare_bath_register(circ, rng)
+        self._prepare_bath_register(circ)
 
         # 4. Apply Generator
         circ.compose(self.gen_circuit, inplace=True)
