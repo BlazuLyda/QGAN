@@ -4,7 +4,7 @@ import math
 import os
 from concurrent.futures import ThreadPoolExecutor
 from typing import Dict, Optional, Any, Tuple, Callable
-from qiskit.circuit import ParameterVector, Parameter
+from qiskit.circuit import ParameterVector
 
 from circuits import QGANCircuits
 
@@ -13,7 +13,7 @@ SHIFT: float = math.pi / 2.0
 
 def tensor_to_bind_dict(
     tensor: torch.Tensor, param_vec: ParameterVector
-) -> Dict[Parameter, float]:
+) -> Dict[Any, float]:
     """
     Maps a PyTorch tensor of values to a Qiskit Parameter dictionary.
 
@@ -30,7 +30,7 @@ def tensor_to_bind_dict(
 
 def compute_parameter_shift_grads(
     calc_circ_expval: Callable[[Any], float],
-    base_bind: Dict[Parameter, float],
+    base_bind: Dict[Any, float],
     target_params: ParameterVector,
     max_workers: Optional[int] = None,
 ) -> np.ndarray:
@@ -41,11 +41,11 @@ def compute_parameter_shift_grads(
         calc_circ_expval: Function that takes a parameter binding dictionary
             and returns the expectation value (float).
         base_bind: Current parameter bindings (theta).
-        target_params: The subset of parameters to compute gradients for.
+        target_params: The subset of parameters to compute gradient for.
         max_workers: Number of threads for parallel evaluation.
 
     Returns:
-        A numpy array containing partial derivatives.
+        A numpy array containing first-order derivatives (gradient).
     """
     n = len(target_params)
     grads = np.zeros(n)
@@ -84,6 +84,129 @@ def compute_parameter_shift_grads(
     return grads
 
 
+class Gradients:
+    """
+    Container for gradient computation methods for QGAN training.
+    """
+
+    @staticmethod
+    def RD_disc_grad(
+        disc_w: torch.Tensor, 
+        qgan: QGANCircuits, 
+        label_val: int
+    ) -> Tuple[torch.Tensor, float]:
+        """
+        Computes the gradient of the Z expectation of the Real-Discriminator
+        circuit with respect to the Discriminator parameters.
+
+        Args:
+            disc_w: Discriminator weights as a torch Tensor.
+            qgan: The QGANCircuits instance.
+            label_val: The class label value
+        """
+
+        # Convert Pytorch Tensor to Qiskit parameter binding dictionary
+        base_bind = tensor_to_bind_dict(disc_w, qgan.disc_params)
+
+        # Initialize the Real-Discriminator circuit evaluator
+        calc_RD_expval = qgan.prepare_RD_circuit(label_val)
+        assert isinstance(calc_RD_expval, Callable)
+
+        # Compute base bind expectation value
+        expval = calc_RD_expval(base_bind)
+
+        # Compute Discriminator gradients using Parameter Shift Rule
+        grads = compute_parameter_shift_grads(
+            calc_RD_expval, base_bind, qgan.disc_params
+        )
+
+        # Convert to torch Tensor
+        grad_disc = torch.from_numpy(grads).to(disc_w.device).type_as(disc_w)
+
+        return grad_disc, expval
+
+
+    @staticmethod
+    def GD_disc_grad(
+        disc_w: torch.Tensor, 
+        gen_w_const: torch.Tensor, 
+        qgan: QGANCircuits, 
+        label_val: int
+    ) -> Tuple[torch.Tensor, float]:
+        """
+        Computes the gradient of the Z expectation of the Generator-Discriminator
+        circuit with respect to the Discriminator parameters.
+
+        Args:
+            disc_w: Discriminator weights as a torch Tensor.
+            gen_w: Generator weights as a torch Tensor.
+            qgan: The QGANCircuits instance.
+            label_val: The class label value
+        """
+
+        # Convert Pytorch Tensor to Qiskit parameter binding dictionary
+        base_bind = tensor_to_bind_dict(disc_w, qgan.disc_params)
+        base_bind.update(tensor_to_bind_dict(gen_w_const, qgan.gen_params))
+
+        # Initialize the Generator-Discriminator circuit evaluator
+        calc_RD_expval = qgan.prepare_GD_circuit(label_val)
+        assert isinstance(calc_RD_expval, Callable)
+
+        # Compute base bind expectation value
+        expval = calc_RD_expval(base_bind)
+
+        # Compute Discriminator gradients using Parameter Shift Rule
+        grads = compute_parameter_shift_grads(
+            calc_RD_expval, base_bind, qgan.disc_params
+        )
+
+        # Convert to torch Tensor
+        grad_disc = torch.from_numpy(grads).to(disc_w.device).type_as(disc_w)
+
+        return grad_disc, expval
+
+
+    @staticmethod
+    def GD_gen_grad(
+        gen_w: torch.Tensor,
+        disc_w_const: torch.Tensor,
+        qgan: QGANCircuits,
+        label_val: int
+    ) -> Tuple[torch.Tensor, float]:
+        """
+        Computes the gradient of the Z expectation of the Generator-Discriminator
+        circuit with respect to the Generator parameters.
+
+        Args:
+            gen_w: Generator weights as a torch Tensor.
+            disc_w_const: Discriminator weights as a torch Tensor (constant).
+            qgan: The QGANCircuits instance.
+            label_val: The class label value
+        """
+
+        # Convert Pytorch Tensor to Qiskit parameter binding dictionary
+        base_bind = tensor_to_bind_dict(gen_w, qgan.gen_params)
+        base_bind.update(tensor_to_bind_dict(disc_w_const, qgan.disc_params))
+
+        # Initialize the Generator-Discriminator circuit evaluator
+        calc_GD_expval = qgan.prepare_GD_circuit(label_val)
+        assert isinstance(calc_GD_expval, Callable)
+
+        # Compute base bind expectation value
+        expval = calc_GD_expval(base_bind)
+
+        # Compute Generator gradients using Parameter Shift Rule
+        grads = compute_parameter_shift_grads(
+            calc_GD_expval, base_bind, qgan.gen_params
+        )
+
+        # Convert to torch Tensor
+        grad_gen = torch.from_numpy(grads).to(gen_w.device).type_as(gen_w)
+
+        return grad_gen, expval
+
+
+
 class RealDiscExpval(torch.autograd.Function):
     """
     Autograd interface for evaluating the Discriminator on Real data.
@@ -99,6 +222,7 @@ class RealDiscExpval(torch.autograd.Function):
         ctx.calc_RD_expval = qgan.prepare_RD_circuit(label_val)
 
         bind = tensor_to_bind_dict(disc_w, qgan.disc_params)
+        assert isinstance(ctx.calc_RD_expval, Callable)
         f0 = ctx.calc_RD_expval(bind)
 
         ctx.save_for_backward(disc_w)

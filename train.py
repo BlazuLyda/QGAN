@@ -1,10 +1,11 @@
 import torch
 import numpy as np
 from dataclasses import dataclass
-from circuits import QGANCircuits
+from circuits import GenCircuit, QGANCircuits
 from data import QuantumDataSource
-from gradients import RealDiscExpval, GenDiscExpval
-
+from evaluation import compute_cross_entropy_over_labels
+from gradients import Gradients
+from tqdm.auto import tqdm
 
 @dataclass
 class TrainingConfig:
@@ -25,6 +26,15 @@ class TrainingConfig:
     batch_size: int = 32 # For use later if mini-batching is implemented
     seed: int|None = None
 
+@dataclass
+class TrainingResult:
+    """
+    Container for training results.
+    """
+    gen_params: torch.Tensor
+    disc_params: torch.Tensor
+    cross_entropies: list[float]
+
 
 class TrainQGAN:
 
@@ -42,12 +52,23 @@ class TrainQGAN:
             n_layers_disc=config.n_layers_disc,
             random=config.seed
         )
+        
+        self.gen_sampler = GenCircuit(
+            n_data_qubits=real_data.n_data,
+            n_label_qubits=real_data.n_label,
+            n_bath_qubits=config.n_qubits_bath,
+            n_layers=config.n_layers_gen,
+        )
 
 
     def run(self):
         """
         Main training loop for the QGAN.
         """
+
+        # Setup pytorch environment
+        torch.set_default_dtype(torch.float64)
+        torch.manual_seed(self.config.seed)
 
         # Initialize Generator and Discriminator parameters
         # Generator: Initialize closer to 0 to preserve Label early on.
@@ -63,6 +84,8 @@ class TrainQGAN:
         opt_g = torch.optim.Adam([gen_w], lr=self.config.lr_g)
         opt_d = torch.optim.Adam([disc_w], lr=self.config.lr_d)
 
+        # Track losses and cross-entropy over iterations
+        cross_entropies = []
 
         # Main training loop
         for iteration in range(self.config.iterations):
@@ -70,28 +93,34 @@ class TrainQGAN:
             # A) Train Discriminator
             for _ in range(self.config.disc_steps):
                 opt_d.zero_grad()
-                total_loss_d = torch.tensor(0.0)
+
+                # Accumulate expectation values over all classes and batch (for tracking loss)
+                expval_RD_total = 0.0
+                expval_GD_total = 0.0
+
+                # Accumulate gradients over all classes and batch
+                grad_d = torch.zeros_like(disc_w)
 
                 # Iterate over all classes
                 for label in range(self.real_data.num_classes):
                     for _ in range(self.config.batch_size):
-                        # Comopute single-shot gradient of DR circuit in relation to disc_w
-                        exp_real = RealDiscExpval.apply(
-                            disc_w, self.qgan, label
-                        )
-                        # Compute single-shot gradient of DG circuit in relation to disc_w
-                        # TODO: add rng
-                        exp_fake = GenDiscExpval.apply(
-                            gen_w.detach(), disc_w, self.qgan, label
-                        )
 
-                        # Minimax Loss D: -( E[Real] - E[Fake] )
-                        # Ideally converges to -2 (if D is perfect and G is bad) or 0 (if G is perfect)
-                        loss_d_label = -(exp_real - exp_fake)
-                        total_loss_d += loss_d_label
+                        # Compute single-point gradients of RD and GD circuits
+                        grad_RD, expval_RD = Gradients.RD_disc_grad(disc_w, self.qgan, label)
+                        grad_GD, expval_GD = Gradients.GD_disc_grad(disc_w, gen_w, self.qgan, label)
+
+                        # Formula for loss is: Loss = expval_RD - expval_GD
+                        # Discriminator tries to maximize this quantity
+                        # Formula for gradient is thus: Grad_G = grad_RD - grad_GD
+                        expval_RD_total += expval_RD
+                        expval_GD_total += expval_GD
+                        grad_d += grad_RD - grad_GD
+
+                # Average gradients over batch and classes
+                grad_d /= (self.real_data.num_classes * self.config.batch_size)
 
                 # Apply optimizer step for Discriminator
-                total_loss_d.backward()
+                disc_w.grad = grad_d
                 opt_d.step()
 
             # Optional tracking: save Discriminator loss after multi-step update
@@ -100,23 +129,51 @@ class TrainQGAN:
             # B) Train Generator
             for _ in range(self.config.gen_steps):
                 opt_g.zero_grad()
-                total_loss_g = torch.tensor(0.0)
+                grad_g = torch.zeros_like(gen_w)
 
                 # Iterate over all classes
                 for label in range(self.real_data.num_classes):
                     for _ in range(self.config.batch_size):
-                        # Compute partial gradients of DG circuit in relation to gen_w
-                        # TODO: add rng
-                        exp_fake = GenDiscExpval.apply(gen_w, disc_w.detach(), self.qgan, label)
 
-                        # Minimax Loss G: - E[Fake]
-                        loss_g_label = -exp_fake
-                        total_loss_g += loss_g_label
+                        # Compute single-point gradient of GD circuit
+                        grad_GD, expval_GD = Gradients.GD_gen_grad(gen_w, disc_w, self.qgan, label)
+
+                        # Formula for loss is: Loss = expval_RD - expval_GD
+                        # Generator tries to minimize this quantity
+                        # Formula for gradient is thus: Grad_G = grad_GD
+                        grad_g += grad_GD
+
+                # Average gradients over batch and classes
+                grad_g /= (self.real_data.num_classes * self.config.batch_size)
 
                 # Apply optimizer step for Generator
-                total_loss_g.backward()
+                gen_w.grad = grad_g
                 opt_g.step()
-                # Optional tracking: save Generator loss after multi-step update
 
             
+            # Optional tracking: save Generator loss after multi-step update
+
             # Optional tracking: compute and save cross entropy after generator update
+            cross_entropies.append(compute_cross_entropy_over_labels(
+                self.real_data,
+                self.gen_sampler,
+                gen_w,
+                n_gen_samples_per_label=2000,
+                eps=1e-12,
+            ))
+
+            # Print progress every 5 iterations
+            if iteration % 5 == 0:
+                print(f"Iteration {iteration:03d}", end="")
+                for label in range(self.real_data.num_classes):
+                    print(f" | CE_{label}: {cross_entropies[-1][label]:.4f}", end="")
+                print("")
+
+
+        # Return trained parameters and any tracked metrics
+        result = TrainingResult(
+            gen_params=gen_w.detach(),
+            disc_params=disc_w.detach(),
+            cross_entropies=cross_entropies
+        )
+        return result
