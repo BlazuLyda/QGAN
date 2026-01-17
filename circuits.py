@@ -1,7 +1,7 @@
 from qiskit import QuantumCircuit
 from qiskit.circuit import ParameterVector
 from qiskit.circuit.library import StatePreparation
-from qiskit.quantum_info import Statevector
+from qiskit.quantum_info import Statevector, DensityMatrix, partial_trace
 from data import QuantumDataSource
 from utils import avg_z_op
 import numpy as np
@@ -110,6 +110,10 @@ class QGANCircuits:
         self.disc_params = ParameterVector("d", self.n_disc_params) # Bindable parameters for Discriminator
 
         # --- Circuits ---
+        # Sizes of the full circuits
+        self.n_RD_qubits = self.n_disc_qubits
+        self.n_GD_qubits = self.n_disc_qubits + self.n_label + self.n_bath
+
         # Measure Z on Decision qubit (Q0)
         self.measure_op_rd = avg_z_op(
             total_qubits=self.n_disc_qubits, target_qubit=0
@@ -174,14 +178,14 @@ class QGANCircuits:
         data_qubits = list(range(data_offset, data_offset + self.n_data))
         circ.append(prep, data_qubits)
 
-    def prepare_RD_circuit(self, label: int):
+    def prepare_RD_circuit(self, label: int, return_circ: bool = False):
         """
         Evaluate the Real vs Discriminator circuit and return the expectation value.
 
         :param label: Label of the class to be sampled from
         :type label: int
         """
-        circ = QuantumCircuit(self.n_disc_qubits)
+        circ = QuantumCircuit(self.n_RD_qubits)
 
         # 1. Decision qubit is already |0>
 
@@ -193,6 +197,9 @@ class QGANCircuits:
 
         # 4. Apply Discriminator (symbolic parameters)
         circ.compose(self.disc_circuit, inplace=True)
+
+        if return_circ:
+            return circ
 
         def apply(binds):
             bound_circ = circ.assign_parameters(binds)
@@ -206,17 +213,13 @@ class QGANCircuits:
         return apply
 
 
-    def prepare_GD_circuit(self, label: int, rand: int | None = None):
+    def prepare_GD_circuit(self, label: int, return_circ: bool = False):
         """
         Evaluate the Generator vs Discriminator circuit and return the expectation value.
 
         :param label: Label of the class to be sampled from
-        :type label: int
-        :param rand: Optional seed for randomness
-        :type rand: int | None
         """
-        rng = np.random.default_rng(rand)
-        circ = QuantumCircuit(self.n_disc_qubits)
+        circ = QuantumCircuit(self.n_GD_qubits)
 
         # 1. Decision qubit is already |0>
 
@@ -224,13 +227,16 @@ class QGANCircuits:
         self._prepare_label_register(circ, label, prepare_g=True)
 
         # 3. Bath register (random noise)
-        self._prepare_bath_register(circ, rng)
+        self._prepare_bath_register(circ)
 
         # 4. Apply Generator (symbolic parameters)
         circ.compose(self.gen_circuit, qubits=self.gen_qubits, inplace=True)
 
         # 4. Apply Discriminator (symbolic parameters)
         circ.compose(self.disc_circuit, qubits=self.disc_qubits, inplace=True)
+
+        if return_circ:
+            return circ
 
         def apply(binds):
             bound_circ = circ.assign_parameters(binds)
@@ -244,7 +250,7 @@ class QGANCircuits:
         return apply
 
 
-class GenCircuits:
+class GenCircuit:
     """
     Quantum circuit that uses the Generator unitary with supplied static parameters
     to generate artificial samples of learned data.
@@ -267,7 +273,6 @@ class GenCircuits:
 
     def __init__(
         self,
-        gen_params,
         n_data_qubits=1,
         n_label_qubits=1,
         n_bath_qubits=1,
@@ -288,7 +293,11 @@ class GenCircuits:
         self.n_qubits = n_data_qubits + n_label_qubits + n_bath_qubits
         self.n_layers = n_layers
 
-        self.gen_params = gen_params
+        # Parameters for Generator
+        self.n_gen_params = Ansatz.count_ansatz_params(self.n_qubits, self.n_layers)
+        self.gen_params = ParameterVector("g", self.n_gen_params) # Bindable parameters for Generator
+
+        # Quantum Circuit
         self.gen_circuit = self._build_gen()
 
     def _build_gen(self):
@@ -318,14 +327,28 @@ class GenCircuits:
             circ.ry(theta, offset + q)
             circ.rz(phi, offset + q)
 
-    def sample_statevector(self, label: int, rand: int | None = None):
+    def trace_out_bath_and_label(self, state: Statevector) -> DensityMatrix:
+        """
+        Given the full generated statevector, trace out the bath and label qubits.
+        """
+        # Indices of qubits to trace out
+        trace_out = (
+            list(range(self.n_label)) +
+            list(range(self.n_label + self.n_data, self.n_qubits))
+        )
+        # Full and reduced density matrices
+        rho_full = DensityMatrix(state)
+        rho_data = partial_trace(rho_full, trace_out)
+
+        return rho_data
+
+
+    def sample_statevector(self, label: int, binds):
         """
         Evaluate the generator circuit and return the full generated statevector.
 
         :param label: Label of the class to be sampled from
-        :type label: int
-        :param rand: Optional seed for randomness
-        :type rand: int | None
+        :param binds: Parameter bindings for the generator circuit
         """
 
         circ = QuantumCircuit(self.n_qubits)
@@ -341,5 +364,23 @@ class GenCircuits:
         # 4. Apply Generator
         circ.compose(self.gen_circuit, inplace=True)
 
-        # 5. Exact simulation
-        return Statevector.from_instruction(circ)
+        # 5. Bind parameters
+        bound_circ = circ.assign_parameters(binds)
+
+        # 6. Exact simulation: get final statevector
+        return Statevector.from_instruction(bound_circ)
+
+
+    def sample_data_density_matrix(self, label: int, binds):
+        """
+        Evaluate the generator circuit and return the reduced density matrix
+        over the data qubits (after tracing out bath and label qubits).
+
+        :param label: Label of the class to be sampled from
+        :param binds: Parameter bindings for the generator circuit
+        """
+
+        full_state = self.sample_statevector(label, binds)
+        reduced_rho = self.trace_out_bath_and_label(full_state)
+
+        return reduced_rho
