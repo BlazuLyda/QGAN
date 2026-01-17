@@ -1,54 +1,86 @@
 import numpy as np
-from qiskit.quantum_info import Statevector
+from qiskit.quantum_info import DensityMatrix
+import torch
 
-from data import QuantumEnsemble
-
-
-def fidelity(psi: Statevector, phi: Statevector) -> float:
-    """
-    Computes similarity between two quantum states via Fidelity. 
-    """
-    return np.abs(np.vdot(psi.data, phi.data)) ** 2
+from circuits import GenCircuit 
+from data import QuantumDataSource, QuantumEnsemble
+from gradients import tensor_to_bind_dict
 
 
-def estimate_p_g(
-    gen_samples: list[Statevector],
-    target_state: Statevector,
-) -> float:
-    """
-    Estimate p_G(|target_state>) via Monte Carlo sampling.
-    This gives a measure of how likely G outputs a state similar
-    to the target state.
-    """
-    fidelities = [
-        np.abs(np.vdot(target_state.data, phi.data)) ** 2
-        for phi in gen_samples
-    ]
-    return float(np.mean(fidelities))
-
-
-def sample_cross_entropy(
-    ensemble: QuantumEnsemble,
+def estimate_generator_density(
     generator_sampler,
-    n_gen_samples: int = 2000,
+    n_gen_samples: int,
+) -> DensityMatrix:
+    """
+    Monte Carlo estimate of the generator's expected density matrix.
+    """
+    rho_sum = None
+
+    for _ in range(n_gen_samples):
+        rho = generator_sampler().data
+        rho_sum = rho if rho_sum is None else rho_sum + rho
+
+    rho_bar = rho_sum / np.trace(rho_sum) if rho_sum is not None else np.zeros_like(rho_sum)
+    return DensityMatrix(rho_bar)
+
+
+def ensemble_cross_entropy_density(
+    ensemble: QuantumEnsemble,
+    rho_gen: DensityMatrix,
     eps: float = 1e-12,
 ) -> float:
     """
-    Monte Carlo estimate of cross entropy H(p_real, p_G).
+    Compute H(p_real, p_G) using density matrices.
     """
-    # Start by generating samples from the learned model (generator),
-    # which give an approximation of the probabilities G assigns
-    # to the Hilbert space (space of quantum states).
-    gen_samples = [generator_sampler() for _ in range(n_gen_samples)]
-
-    # Now compute the sample cross entropy by iterating over all of
-    # the states belonging to the real data and comparing their true
-    # probability of occuring to the one given by the Generator.
     H = 0.0
+
     for psi, p_real in zip(ensemble.states, ensemble.probs):
-        p_g = estimate_p_g(gen_samples, psi)
+        ket = psi.data.reshape(-1, 1)
+        # Density matrix of the state from ensemble |psi><psi|
+        proj = ket @ ket.conj().T
+
+        # Probability assigned by generator to this state
+        p_g = np.real(np.trace(rho_gen.data @ proj))
         p_g = max(p_g, eps)
+
+        # Cross-entropy contribution
         H -= p_real * np.log(p_g)
 
-    return H
+    return float(H)
+
+
+def compute_cross_entropy_over_labels(
+    data_source: QuantumDataSource,
+    gen: GenCircuit,
+    gen_w: torch.Tensor,
+    n_gen_samples_per_label: int = 2000,
+    eps: float = 1e-12,
+) -> list[float]:
+
+    cross_entropies = []
+    param_bind = tensor_to_bind_dict(gen_w, gen.gen_params)
+
+    for label in range(data_source.num_classes):
+
+        # Real data
+        ensemble = data_source.get_ensemble(label)
+
+        # Generator density matrix (Monte Carlo)
+        generator_sampler = lambda: gen.sample_data_density_matrix(
+            label, param_bind
+        )
+        rho_gen = estimate_generator_density(
+            generator_sampler,
+            n_gen_samples_per_label,
+        )
+
+        H = ensemble_cross_entropy_density(
+            ensemble,
+            rho_gen,
+            eps=eps,
+        )
+        cross_entropies.append(H)
+
+    return cross_entropies
+
 
