@@ -1,5 +1,5 @@
 import numpy as np
-from pyparsing import Any
+from typing import Any
 from qiskit.quantum_info import DensityMatrix
 import torch
 
@@ -82,9 +82,10 @@ def compute_cross_entropy_over_labels(
         ensemble = data_source.get_ensemble(label)
 
         # Generator density matrix (Monte Carlo)
-        generator_sampler = lambda: gen.sample_data_density_matrix(
-            label, param_bind
-        )
+        def generator_sampler():
+            return gen.sample_data_density_matrix(
+                    label, param_bind
+                )
         rho_gen = estimate_generator_density(
             generator_sampler,
             n_gen_samples_per_label,

@@ -5,7 +5,6 @@ from circuits import GenCircuit, QGANCircuits
 from data import QuantumDataSource
 from evaluation import compute_cross_entropy_over_labels_tensor
 from gradients import Gradients
-from tqdm.auto import tqdm
 
 @dataclass
 class TrainingConfig:
