@@ -7,6 +7,18 @@ from data import QuantumDataSource
 from evaluation import compute_cross_entropy_over_labels_tensor
 from gradients import Gradients
 
+
+def lr_d_schedule(d_step: int) -> float:
+    """
+    Discriminator learning rate schedule from the paper:
+    - exponential decay 10 → 0.1 over first 4000 D steps
+    - constant 0.1 afterwards
+    """
+    if d_step < 4000:
+        r = (0.1 / 10.0) ** (1.0 / 4000.0)
+        return 10.0 * (r ** d_step)
+    return 0.1
+
 @dataclass
 class TrainingConfig:
     """
@@ -72,6 +84,8 @@ class TrainQGAN:
         Main training loop for the QGAN.
         """
 
+        d_step = 0  # global discriminator update counter
+
         # Setup pytorch environment
         torch.set_default_dtype(torch.float64)
         torch.manual_seed(self.config.seed)
@@ -86,9 +100,9 @@ class TrainQGAN:
             torch.tensor(np.random.uniform(-np.pi, np.pi, self.qgan.n_disc_params))
         )
 
-        # Use Adam optimizers for both Generator and Discriminator
-        opt_g = torch.optim.Adam([gen_w], lr=self.config.lr_g)
-        opt_d = torch.optim.Adam([disc_w], lr=self.config.lr_d)
+        # Use SGD optimizers for both Generator and Discriminator
+        opt_g = torch.optim.SGD([gen_w], lr=self.config.lr_g)
+        opt_d = torch.optim.SGD([disc_w], lr=self.config.lr_d)
 
         # Track losses and cross-entropy over iterations
         cross_entropies = []
@@ -106,14 +120,25 @@ class TrainQGAN:
 
                 # Apply optimizer step for Discriminator
                 disc_w.grad = grad_d
+
+                lr_d = lr_d_schedule(d_step)
+                opt_d.param_groups[0]["lr"] = lr_d
+
                 opt_d.step()
+
+                d_step += 1
+
+                if d_step % 1000 == 0:
+                    lr_d_now = opt_d.param_groups[0]["lr"]
+                    lr_g_now = 5.0 * lr_d_now
+                    print(f"d_step={d_step} lr_d={lr_d_now:.4f} (implied lr_g={lr_g_now:.4f})")
+
 
             # Optional tracking: save Discriminator loss after multi-step update
 
 
             # B) Train Generator
             for _ in range(self.config.gen_steps):
-
 
                 opt_g.zero_grad()
 
@@ -122,6 +147,10 @@ class TrainQGAN:
 
                 # Apply optimizer step for Generator
                 gen_w.grad = grad_g
+
+                lr_g = 5.0 * lr_d_schedule(d_step)
+                opt_g.param_groups[0]["lr"] = lr_g
+
                 opt_g.step()
             
             # Optional tracking: save Generator loss after multi-step update
@@ -136,7 +165,7 @@ class TrainQGAN:
             ))
 
             # Print progress every 5 iterations
-            if iteration % 5 == 0:
+            if iteration % 20 == 0:
                 print(f"Iteration {iteration:03d}", end="")
                 for label in range(self.real_data.num_classes):
                     print(f" | CE_{label}: {cross_entropies[-1][label]:.4f}", end="")

@@ -14,29 +14,6 @@ LR_G = 0.15
 LR_D = 0.04
 # ---------------------
 
-def init_cx_training():
-
-    config = TrainingConfig(
-        n_qubits_bath=0,
-        n_layers_gen=N_LAYERS_GEN,
-        n_layers_disc=N_LAYERS_DISC,
-        iterations=100,
-        disc_steps=DISC_STEPS,
-        gen_steps=1,
-        lr_g=LR_G,
-        lr_d=LR_D,
-        batch_size=1, # Used data source has pure classes, thus no bath register and no randomness
-        seed=42
-    )
-
-    training = TrainQGAN(
-        real_data=create_cx_data_source(),
-        config=config
-    )
-
-    return training
-
-
 def init_simple_training():
 
     config = TrainingConfig(
