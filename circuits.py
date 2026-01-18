@@ -342,15 +342,11 @@ class GenCircuit:
 
         return rho_data
 
-
-    def sample_statevector(self, label: int, binds):
+    def prepare_circuit(self, label: int) -> QuantumCircuit:
         """
-        Evaluate the generator circuit and return the full generated statevector.
-
-        :param label: Label of the class to be sampled from
-        :param binds: Parameter bindings for the generator circuit
+        Prepare the full parameterized Generator circuit with label and bath initialization.
+        The initialization includes random bath state preparation.
         """
-
         circ = QuantumCircuit(self.n_qubits)
 
         # 1. Label register
@@ -364,10 +360,23 @@ class GenCircuit:
         # 4. Apply Generator
         circ.compose(self.gen_circuit, inplace=True)
 
-        # 5. Bind parameters
+        return circ
+
+
+    def sample_statevector(self, label: int, binds):
+        """
+        Evaluate the generator circuit and return the full generated statevector.
+
+        :param label: Label of the class to be sampled from
+        :param binds: Parameter bindings for the generator circuit
+        """
+        # 1. Prepare the parameterized circuit
+        circ = self.prepare_circuit(label)
+
+        # 2. Bind parameters
         bound_circ = circ.assign_parameters(binds)
 
-        # 6. Exact simulation: get final statevector
+        # 3. Exact simulation: get final statevector
         return Statevector.from_instruction(bound_circ)
 
 

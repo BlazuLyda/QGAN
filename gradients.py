@@ -77,6 +77,10 @@ def compute_parameter_shift_grads(
             grads[i] = g
         return grads
 
+    # ----> Performance note:
+    # The overhead of threading is way too high to make this piece of code worth it
+    # We have around 30 - 100 parameters typically, so threading doesn't help much
+    # I think it makes more sense to multithread batch evaluations at a higher level (training loop)
     with ThreadPoolExecutor(max_workers=max_workers) as ex:
         for i, g in ex.map(one_param, range(n)):
             grads[i] = g

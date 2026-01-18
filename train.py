@@ -3,7 +3,7 @@ import numpy as np
 from dataclasses import dataclass
 from circuits import GenCircuit, QGANCircuits
 from data import QuantumDataSource
-from evaluation import compute_cross_entropy_over_labels
+from evaluation import compute_cross_entropy_over_labels_tensor
 from gradients import Gradients
 from tqdm.auto import tqdm
 
@@ -25,6 +25,9 @@ class TrainingConfig:
     lr_d: float = 0.01
     batch_size: int = 32 # For use later if mini-batching is implemented
     seed: int|None = None
+
+    # Logging parameters
+    cross_entropy_samples: int = 2000 # Number of samples to estimate cross-entropy
 
 @dataclass
 class TrainingResult:
@@ -111,10 +114,10 @@ class TrainQGAN:
 
                         # Formula for loss is: Loss = expval_RD - expval_GD
                         # Discriminator tries to maximize this quantity
-                        # Formula for gradient is thus: Grad_G = grad_RD - grad_GD
+                        # Formula for gradient is thus: Grad_G = -(grad_RD - grad_GD), since pyTorch does gradient descent
                         expval_RD_total += expval_RD
                         expval_GD_total += expval_GD
-                        grad_d += grad_RD - grad_GD
+                        grad_d += grad_GD - grad_RD
 
                 # Average gradients over batch and classes
                 grad_d /= (self.real_data.num_classes * self.config.batch_size)
@@ -140,8 +143,8 @@ class TrainQGAN:
 
                         # Formula for loss is: Loss = expval_RD - expval_GD
                         # Generator tries to minimize this quantity
-                        # Formula for gradient is thus: Grad_G = grad_GD
-                        grad_g += grad_GD
+                        # Formula for gradient is thus: Grad_G = - grad_GD, since pyTorch does gradient descent
+                        grad_g += -grad_GD
 
                 # Average gradients over batch and classes
                 grad_g /= (self.real_data.num_classes * self.config.batch_size)
@@ -154,11 +157,11 @@ class TrainQGAN:
             # Optional tracking: save Generator loss after multi-step update
 
             # Optional tracking: compute and save cross entropy after generator update
-            cross_entropies.append(compute_cross_entropy_over_labels(
+            cross_entropies.append(compute_cross_entropy_over_labels_tensor(
                 self.real_data,
                 self.gen_sampler,
                 gen_w,
-                n_gen_samples_per_label=2000,
+                n_gen_samples_per_label=self.config.cross_entropy_samples,
                 eps=1e-12,
             ))
 

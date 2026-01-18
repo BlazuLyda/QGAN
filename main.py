@@ -3,15 +3,15 @@ from gradients import tensor_to_bind_dict
 from qiskit.quantum_info import Statevector
 
 from train import TrainQGAN, TrainingConfig
+from evaluation import compute_cross_entropy_over_labels_tensor
 
 # --- Configuration matching Paper Numerics ---
 N_LAYERS_GEN = 2    # Paper: 2 layers for Generator
 N_LAYERS_DISC = 4   # Paper: 4 layers for Discriminator (Critical for flow Q2->Q1->Q0)
-STEPS = 100         # Total Generator steps
 DISC_STEPS = 10     # Train Discriminator 10 times per Generator step
 GEN_STEPS = 2       # Train Generator 2 times per iteration
-LR_G = 0.25
-LR_D = 0.05
+LR_G = 0.15
+LR_D = 0.04
 # ---------------------
 
 def init_cx_training():
@@ -20,7 +20,7 @@ def init_cx_training():
         n_qubits_bath=0,
         n_layers_gen=N_LAYERS_GEN,
         n_layers_disc=N_LAYERS_DISC,
-        iterations=STEPS,
+        iterations=100,
         disc_steps=DISC_STEPS,
         gen_steps=1,
         lr_g=LR_G,
@@ -43,13 +43,14 @@ def init_simple_training():
         n_qubits_bath=0,
         n_layers_gen=1,
         n_layers_disc=3,
-        iterations=STEPS,
+        iterations=500,
         disc_steps=DISC_STEPS,
         gen_steps=1,
         lr_g=LR_G,
         lr_d=LR_D,
         batch_size=1, # Used data source has pure classes, thus no bath register and no randomness
-        seed=42
+        seed=100,
+        cross_entropy_samples=200 # Small number for quick (but less accurate) testing
     )
 
     # Single class data source |+> = ( |0> + |1> ) / sqrt(2)
@@ -59,7 +60,7 @@ def init_simple_training():
     )
     data = QuantumDataSource(
         n_qubits_data=1,
-        n_qubits_label=1,
+        n_qubits_label=0,
         ensembles=[ens_0]
     )
 
@@ -72,11 +73,6 @@ def init_simple_training():
 
 def main():
 
-    # Piece of code that might be useful later
-    # --- Logging ---
-    # if step % 20 == 0:
-    #     print(f"Step {step:03d} | Loss D: {avg_loss_d:.4f} | Loss G: {total_loss_g.item():.4f}")
-
     # config, training = init_cx_training()
     training = init_simple_training()
     print("Training initialized. Starting training...")
@@ -84,14 +80,27 @@ def main():
     result = training.run()
 
     # Final Verification
-    print("--- Training Finished ---")
+    print("\n--- Training Finished ---\n")
 
     print(f"Trained Generator Parameters:\n{result.gen_params}")
     print(f"Trained Discriminator Parameters:\n{result.disc_params}")
 
-    print("\n--- Generated Samples from Trained Generator ---")
+    # For each class, compute accurate (large sample) cross-entropy
+    ces = compute_cross_entropy_over_labels_tensor(
+        training.real_data,
+        training.gen_sampler,
+        result.gen_params,
+        n_gen_samples_per_label=10000
+    )
+
+    print("\n--- Final Cross-Entropies per Class ---\n")
+    for label, ce in enumerate(ces):
+        print(f"Class {label}: Cross-Entropy = {ce:.6f}")
+
 
     # For each class, sample states from the trained Generator
+    print("\n--- Generated Samples from Trained Generator ---")
+
     n_samples = 3
     gen_param_bind = tensor_to_bind_dict(
         result.gen_params,

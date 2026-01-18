@@ -1,4 +1,5 @@
 import numpy as np
+from pyparsing import Any
 from qiskit.quantum_info import DensityMatrix
 import torch
 
@@ -48,8 +49,7 @@ def ensemble_cross_entropy_density(
 
     return float(H)
 
-
-def compute_cross_entropy_over_labels(
+def compute_cross_entropy_over_labels_tensor(
     data_source: QuantumDataSource,
     gen: GenCircuit,
     gen_w: torch.Tensor,
@@ -57,8 +57,24 @@ def compute_cross_entropy_over_labels(
     eps: float = 1e-12,
 ) -> list[float]:
 
+    return compute_cross_entropy_over_labels(
+        data_source,
+        gen,
+        tensor_to_bind_dict(gen_w, gen.gen_params),
+        n_gen_samples_per_label,
+        eps,
+    )
+
+
+def compute_cross_entropy_over_labels(
+    data_source: QuantumDataSource,
+    gen: GenCircuit,
+    param_bind: dict[Any, float],
+    n_gen_samples_per_label: int = 2000,
+    eps: float = 1e-12,
+) -> list[float]:
+
     cross_entropies = []
-    param_bind = tensor_to_bind_dict(gen_w, gen.gen_params)
 
     for label in range(data_source.num_classes):
 
