@@ -1,9 +1,7 @@
 import torch
 import numpy as np
 import math
-import os
-from concurrent.futures import ThreadPoolExecutor
-from typing import Dict, Optional, Any, Tuple, Callable
+from typing import Dict, Any, Tuple, Callable
 from qiskit.circuit import ParameterVector
 
 from circuits import QGANCircuits
@@ -32,7 +30,6 @@ def compute_parameter_shift_grads(
     calc_circ_expval: Callable[[Any], float],
     base_bind: Dict[Any, float],
     target_params: ParameterVector,
-    max_workers: Optional[int] = None,
 ) -> np.ndarray:
     """
     Computes gradients for a set of parameters using the Parameter Shift Rule.
@@ -42,7 +39,6 @@ def compute_parameter_shift_grads(
             and returns the expectation value (float).
         base_bind: Current parameter bindings (theta).
         target_params: The subset of parameters to compute gradient for.
-        max_workers: Number of threads for parallel evaluation.
 
     Returns:
         A numpy array containing first-order derivatives (gradient).
@@ -50,13 +46,7 @@ def compute_parameter_shift_grads(
     n = len(target_params)
     grads = np.zeros(n)
 
-    if n == 0:
-        return grads
-
-    if max_workers is None:
-        max_workers = int(os.getenv("QGAN_WORKERS", "0")) or (os.cpu_count() or 1)
-
-    def one_param(i: int) -> Tuple[int, float]:
+    for i in range(n):
         param = target_params[i]
 
         # f(theta + pi/2)
@@ -69,21 +59,7 @@ def compute_parameter_shift_grads(
         bind_minus[param] -= SHIFT
         f_minus = calc_circ_expval(bind_minus)
 
-        return i, 0.5 * (f_plus - f_minus)
-
-    if n < 4 or max_workers == 1:
-        for i in range(n):
-            _, g = one_param(i)
-            grads[i] = g
-        return grads
-
-    # ----> Performance note:
-    # The overhead of threading is way too high to make this piece of code worth it
-    # We have around 30 - 100 parameters typically, so threading doesn't help much
-    # I think it makes more sense to multithread batch evaluations at a higher level (training loop)
-    with ThreadPoolExecutor(max_workers=max_workers) as ex:
-        for i, g in ex.map(one_param, range(n)):
-            grads[i] = g
+        grads[i] = 0.5 * (f_plus - f_minus)
 
     return grads
 
@@ -208,103 +184,3 @@ class Gradients:
         grad_gen = torch.from_numpy(grads).to(gen_w.device).type_as(gen_w)
 
         return grad_gen, expval
-
-
-
-class RealDiscExpval(torch.autograd.Function):
-    """
-    Autograd interface for evaluating the Discriminator on Real data.
-    """
-
-    @staticmethod
-    def forward(
-        ctx: Any, disc_w: torch.Tensor, qgan: QGANCircuits, label_val: int
-    ) -> torch.Tensor:
-        """Computes the forward pass (expectation value) for Real data."""
-        ctx.qgan = qgan
-
-        ctx.calc_RD_expval = qgan.prepare_RD_circuit(label_val)
-
-        bind = tensor_to_bind_dict(disc_w, qgan.disc_params)
-        assert isinstance(ctx.calc_RD_expval, Callable)
-        f0 = ctx.calc_RD_expval(bind)
-
-        ctx.save_for_backward(disc_w)
-        return disc_w.new_tensor(f0)
-
-    @staticmethod
-    def backward(
-        ctx: Any, *grad_outputs: torch.Tensor
-    ) -> Tuple[Optional[torch.Tensor], Optional[None], Optional[None]]:
-        """
-        Backward pass for Real-Discriminator circuit.
-        Returns 3 values to match forward(disc_w, qgan, label_val).
-        """
-        grad_output = grad_outputs[0]
-        (disc_w,) = ctx.saved_tensors
-        bind = tensor_to_bind_dict(disc_w, ctx.qgan.disc_params)
-
-        grads = compute_parameter_shift_grads(
-            ctx.calc_RD_expval, bind, ctx.qgan.disc_params
-        )
-
-        grad_disc = torch.from_numpy(grads).to(disc_w.device).type_as(disc_w)
-        # Returns grad for disc_w, None for qgan, None for label_val
-        return grad_disc * grad_output, None, None
-
-
-class GenDiscExpval(torch.autograd.Function):
-    """
-    Autograd interface for evaluating the Discriminator on Generated data.
-    This function primarily updates the Generator weights.
-    """
-
-    @staticmethod
-    def forward(
-        ctx: Any,
-        gen_w: torch.Tensor,
-        disc_w_const: torch.Tensor,
-        qgan: Any,
-        label_val: int,
-        seed: Optional[int] = None,
-    ) -> torch.Tensor:
-        """Computes the forward pass for Generated data."""
-        ctx.qgan = qgan
-
-        rng = np.random.default_rng(seed)
-        ctx.calc_GD_expval = qgan.prepare_GD_circuit(label_val, rng)
-
-        bind = tensor_to_bind_dict(gen_w, qgan.gen_params)
-        bind.update(tensor_to_bind_dict(disc_w_const, qgan.disc_params))
-
-        f0 = ctx.calc_GD_expval(bind)
-
-        ctx.save_for_backward(gen_w, disc_w_const)
-        return gen_w.new_tensor(f0)
-
-    @staticmethod
-    def backward(
-        ctx: Any, *grad_outputs: torch.Tensor
-    ) -> Tuple[
-        Optional[torch.Tensor],
-        Optional[None],
-        Optional[None],
-        Optional[None],
-        Optional[None],
-    ]:
-        """
-        Backward pass for Generator-Discriminator circuit.
-        Returns 5 values to match forward(gen_w, disc_w_const, qgan, label_val, seed).
-        """
-        grad_output = grad_outputs[0]
-        gen_w, disc_w_const = ctx.saved_tensors
-        bind = tensor_to_bind_dict(gen_w, ctx.qgan.gen_params)
-        bind.update(tensor_to_bind_dict(disc_w_const, ctx.qgan.disc_params))
-
-        grads = compute_parameter_shift_grads(
-            ctx.calc_GD_expval, bind, ctx.qgan.gen_params
-        )
-
-        grad_gen = torch.from_numpy(grads).to(gen_w.device).type_as(gen_w)
-        # Returns grad for gen_w, and None for all other forward inputs
-        return grad_gen * grad_output, None, None, None, None
