@@ -1,3 +1,4 @@
+from concurrent.futures import ThreadPoolExecutor
 import torch
 import numpy as np
 from dataclasses import dataclass
@@ -27,6 +28,9 @@ class TrainingConfig:
 
     # Logging parameters
     cross_entropy_samples: int = 2000 # Number of samples to estimate cross-entropy
+
+    # Architecture parameters
+    max_workers: int = 10 # For parallel gradient computations
 
 @dataclass
 class TrainingResult:
@@ -94,32 +98,11 @@ class TrainQGAN:
 
             # A) Train Discriminator
             for _ in range(self.config.disc_steps):
+                
                 opt_d.zero_grad()
 
-                # Accumulate expectation values over all classes and batch (for tracking loss)
-                expval_RD_total = 0.0
-                expval_GD_total = 0.0
-
-                # Accumulate gradients over all classes and batch
-                grad_d = torch.zeros_like(disc_w)
-
-                # Iterate over all classes
-                for label in range(self.real_data.num_classes):
-                    for _ in range(self.config.batch_size):
-
-                        # Compute single-point gradients of RD and GD circuits
-                        grad_RD, expval_RD = Gradients.RD_disc_grad(disc_w, self.qgan, label)
-                        grad_GD, expval_GD = Gradients.GD_disc_grad(disc_w, gen_w, self.qgan, label)
-
-                        # Formula for loss is: Loss = expval_RD - expval_GD
-                        # Discriminator tries to maximize this quantity
-                        # Formula for gradient is thus: Grad_G = -(grad_RD - grad_GD), since pyTorch does gradient descent
-                        expval_RD_total += expval_RD
-                        expval_GD_total += expval_GD
-                        grad_d += grad_GD - grad_RD
-
-                # Average gradients over batch and classes
-                grad_d /= (self.real_data.num_classes * self.config.batch_size)
+                # Compute discriminator gradient step
+                grad_d, expval_RD, expval_GD = self.discriminator_step(disc_w=disc_w, gen_w=gen_w)
 
                 # Apply optimizer step for Discriminator
                 disc_w.grad = grad_d
@@ -130,28 +113,16 @@ class TrainQGAN:
 
             # B) Train Generator
             for _ in range(self.config.gen_steps):
+
+
                 opt_g.zero_grad()
-                grad_g = torch.zeros_like(gen_w)
 
-                # Iterate over all classes
-                for label in range(self.real_data.num_classes):
-                    for _ in range(self.config.batch_size):
-
-                        # Compute single-point gradient of GD circuit
-                        grad_GD, expval_GD = Gradients.GD_gen_grad(gen_w, disc_w, self.qgan, label)
-
-                        # Formula for loss is: Loss = expval_RD - expval_GD
-                        # Generator tries to minimize this quantity
-                        # Formula for gradient is thus: Grad_G = - grad_GD, since pyTorch does gradient descent
-                        grad_g += -grad_GD
-
-                # Average gradients over batch and classes
-                grad_g /= (self.real_data.num_classes * self.config.batch_size)
+                # Compute generator gradient step
+                grad_g, expval_GD = self.generator_step(gen_w=gen_w, disc_w=disc_w)
 
                 # Apply optimizer step for Generator
                 gen_w.grad = grad_g
                 opt_g.step()
-
             
             # Optional tracking: save Generator loss after multi-step update
 
@@ -179,3 +150,123 @@ class TrainQGAN:
             cross_entropies=cross_entropies
         )
         return result
+
+
+    def discriminator_step(
+        self,
+        disc_w: torch.Tensor,
+        gen_w: torch.Tensor
+    ):
+        # Lambda to build args for gradient computation tasks
+        def build_args(label):
+            return (label, disc_w, gen_w, self.qgan)
+
+        # Run classes x batches tasks in parallel for a single gradient step
+        results = self.run_parallel_gradient_computation(
+            self.disc_batch_task,
+            build_args
+        )
+
+        # Accumulate gradients and expectation values
+        grad_d = torch.zeros_like(disc_w)
+        expval_RD_total = 0.0
+        expval_GD_total = 0.0
+
+        for grad_RD, grad_GD, expval_RD, expval_GD in results:
+            expval_RD_total += expval_RD
+            expval_GD_total += expval_GD
+
+            # Formula for loss is: Loss = expval_RD - expval_GD
+            # Discriminator tries to maximize this quantity
+            # Formula for gradient is thus: Grad_G = -(grad_RD - grad_GD), since pyTorch does gradient descent
+            grad_d += grad_GD - grad_RD
+
+        # Normalize gradients
+        normalizer = self.real_data.num_classes * self.config.batch_size
+        grad_d /= normalizer
+
+        return grad_d, expval_RD_total / normalizer, expval_GD_total / normalizer
+
+
+    def generator_step(
+        self,
+        gen_w: torch.Tensor,
+        disc_w: torch.Tensor,
+    ):
+        # Lambda to build args for gradient computation tasks
+        def build_args(label):
+            return (label, gen_w, disc_w, self.qgan)
+
+        # Run classes x batches tasks in parallel for a single gradient step
+        results = self.run_parallel_gradient_computation(
+            self.gen_batch_task,
+            build_args
+        )
+
+        # Accumulate gradients and expectation values
+        grad_g = torch.zeros_like(gen_w)
+        expval_GD_total = 0.0
+
+        for grad_GD, expval_GD in results:
+            expval_GD_total += expval_GD
+
+            # Formula for loss is: Loss = expval_RD - expval_GD
+            # Generator tries to minimize this quantity
+            # Formula for gradient is thus: Grad_G = - grad_GD, since pyTorch does gradient descent
+            grad_g += -grad_GD
+
+        # Normalize gradients
+        normalizer = self.real_data.num_classes * self.config.batch_size
+        grad_g /= normalizer
+
+        return grad_g, expval_GD_total / normalizer
+
+
+    @staticmethod
+    def disc_batch_task(args) -> tuple[torch.Tensor, torch.Tensor, float, float]:
+        """
+        One discriminator task for a single (label, batch) sample.
+        """
+        label, disc_w_np, gen_w_np, qgan = args
+
+        grad_RD, expval_RD = Gradients.RD_disc_grad(
+            disc_w_np, qgan, label
+        )
+        grad_GD, expval_GD = Gradients.GD_disc_grad(
+            disc_w_np, gen_w_np, qgan, label
+        )
+
+        return grad_RD, grad_GD, expval_RD, expval_GD
+
+
+    @staticmethod
+    def gen_batch_task(args) -> tuple[torch.Tensor, float]:
+        """
+        One generator task for a single (label, batch) sample.
+        """
+        label, gen_w_np, disc_w_np, qgan = args
+
+        grad_GD, expval_GD = Gradients.GD_gen_grad(
+            gen_w_np, disc_w_np, qgan, label
+        )
+
+        return grad_GD, expval_GD
+
+    
+    def run_parallel_gradient_computation(
+        self,
+        task_fn,
+        task_args_builder
+    ):
+        """
+        Generic parallel executor over (label, batch) tasks.
+        """
+        tasks = []
+        for label in range(self.real_data.num_classes):
+            for _ in range(self.config.batch_size):
+                tasks.append(task_args_builder(label))
+
+        with ThreadPoolExecutor(max_workers=self.config.max_workers) as executor:
+            return list(executor.map(task_fn, tasks))
+
+
