@@ -6,6 +6,43 @@ from data import QuantumDataSource
 from utils import avg_z_op
 import numpy as np
 
+def count_conditional_gen_params(n_label: int, n_data: int, n_bath: int, n_layers: int) -> int:
+    non_label = n_data + n_bath
+    local = 2 * non_label
+    ent = (non_label - 1) if non_label > 1 else 0
+    cond = 2 * n_label * n_data
+    return n_layers * (local + ent + cond)
+
+
+def add_conditional_gen_ansatz(circ, n_label, n_data, n_bath, n_layers, params):
+    expected = count_conditional_gen_params(n_label, n_data, n_bath, n_layers)
+    if expected != len(params):
+        raise Exception(f"Expected {expected} params, got {len(params)}")
+
+    label_qubits = list(range(0, n_label))
+    data_qubits  = list(range(n_label, n_label + n_data))
+    bath_qubits  = list(range(n_label + n_data, n_label + n_data + n_bath))
+    non_label_qubits = data_qubits + bath_qubits
+
+    k = 0
+    for _ in range(n_layers):
+        # 1) local rotations on data+bath
+        for q in non_label_qubits:
+            circ.rx(params[k], q); k += 1
+            circ.rz(params[k], q); k += 1
+
+        # 2) entanglers on data+bath
+        if len(non_label_qubits) > 1:
+            for i in range(len(non_label_qubits) - 1):
+                circ.rzz(params[k], non_label_qubits[i], non_label_qubits[i+1]); k += 1
+
+        # 3) conditioning: label controls each data qubit
+        for l in label_qubits:
+            for d in data_qubits:
+                circ.cry(params[k], l, d); k += 1
+                circ.crz(params[k], l, d); k += 1
+
+
 class Ansatz:
     @staticmethod
     def count_ansatz_params(n_qubits, n_layers):
@@ -94,7 +131,14 @@ class QGANCircuits:
 
         # Generator: Acts on Label(m) + Data(n) + Entropy/Bath(k)
         self.n_gen_qubits = self.n_label + self.n_data + self.n_bath
-        self.gen_qubits = list(range(self.offsets["data"], self.offsets["data"] + self.n_gen_qubits))
+
+        label_g_qubits = list(range(self.offsets["label_g"], self.offsets["label_g"] + self.n_label))
+        data_qubits    = list(range(self.offsets["data"],    self.offsets["data"]    + self.n_data))
+        bath_qubits    = list(range(self.offsets["bath"],    self.offsets["bath"]    + self.n_bath))
+
+        # Map generator subcircuit qubits in the order [label, data, bath]
+        self.gen_qubits = label_g_qubits + data_qubits + bath_qubits
+
         self.n_layers_gen = n_layers_gen
 
         # Discriminator: Acts on Decision(1) + Label(m) + Data(n)
@@ -103,7 +147,9 @@ class QGANCircuits:
         self.n_layers_disc = n_layers_disc
 
         # --- Parameters ---
-        self.n_gen_params = Ansatz.count_ansatz_params(self.n_gen_qubits, n_layers_gen)
+        self.n_gen_params = count_conditional_gen_params(
+            self.n_label, self.n_data, self.n_bath, self.n_layers_gen
+        )
         self.gen_params = ParameterVector("g", self.n_gen_params) # Bindable parameters for Generator
 
         self.n_disc_params = Ansatz.count_ansatz_params(self.n_disc_qubits, n_layers_disc)
@@ -127,7 +173,14 @@ class QGANCircuits:
 
     def _build_gen_ansatz(self):
         circ = QuantumCircuit(self.n_gen_qubits)
-        Ansatz.add_ansatz(list(range(self.n_gen_qubits)), self.n_layers_gen, circ, self.gen_params)
+        add_conditional_gen_ansatz(
+            circ=circ,
+            n_label=self.n_label,
+            n_data=self.n_data,
+            n_bath=self.n_bath,
+            n_layers=self.n_layers_gen,
+            params=self.gen_params,
+        )
         return circ
 
     def _build_disc_ansatz(self):
@@ -294,7 +347,9 @@ class GenCircuit:
         self.n_layers = n_layers
 
         # Parameters for Generator
-        self.n_gen_params = Ansatz.count_ansatz_params(self.n_qubits, self.n_layers)
+        self.n_gen_params = count_conditional_gen_params(
+            self.n_label, self.n_data, self.n_bath, self.n_layers
+        )
         self.gen_params = ParameterVector("g", self.n_gen_params) # Bindable parameters for Generator
 
         # Quantum Circuit
@@ -302,7 +357,14 @@ class GenCircuit:
 
     def _build_gen(self):
         circ = QuantumCircuit(self.n_qubits)
-        Ansatz.add_ansatz(list(range(self.n_qubits)), self.n_layers, circ, self.gen_params)
+        add_conditional_gen_ansatz(
+            circ=circ,
+            n_label=self.n_label,
+            n_data=self.n_data,
+            n_bath=self.n_bath,
+            n_layers=self.n_layers,
+            params=self.gen_params,
+        )
         return circ
 
     def _prepare_label_register(self, circ: QuantumCircuit, label: int):
