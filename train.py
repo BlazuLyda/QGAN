@@ -52,6 +52,8 @@ class TrainingResult:
     gen_params: torch.Tensor
     disc_params: torch.Tensor
     cross_entropies: list[float]
+    expvals_RD: list[float]
+    expvals_GD: list[float]
 
 
 class TrainQGAN:
@@ -93,7 +95,7 @@ class TrainQGAN:
         # Initialize Generator and Discriminator parameters
         # Generator: Initialize closer to 0 to preserve Label early on.
         gen_w = torch.nn.Parameter(
-            torch.tensor(np.random.uniform(-0.1, 0.1, self.qgan.n_gen_params))
+            torch.tensor(np.random.uniform(-np.pi, np.pi, self.qgan.n_gen_params))
         )
         # Discriminator: Initialize widely [-pi, pi] to avoid barren plateaus.
         disc_w = torch.nn.Parameter(
@@ -106,6 +108,8 @@ class TrainQGAN:
 
         # Track losses and cross-entropy over iterations
         cross_entropies = []
+        expvals_RD = []
+        expvals_GD = []
 
         # Main training loop
         for iteration in range(self.config.iterations):
@@ -119,7 +123,7 @@ class TrainQGAN:
                 grad_d, expval_RD, expval_GD = self.discriminator_step(disc_w=disc_w, gen_w=gen_w)
 
                 # Apply optimizer step for Discriminator
-                disc_w.grad = grad_d
+                disc_w.grad = grad_d / 4.0
 
                 lr_d = lr_d_schedule(d_step)
                 opt_d.param_groups[0]["lr"] = lr_d
@@ -132,6 +136,9 @@ class TrainQGAN:
                     lr_d_now = opt_d.param_groups[0]["lr"]
                     lr_g_now = 5.0 * lr_d_now
                     print(f"d_step={d_step} lr_d={lr_d_now:.4f} (implied lr_g={lr_g_now:.4f})")
+
+                expvals_RD.append(expval_RD)
+                expvals_GD.append(expval_GD)
 
 
             # Optional tracking: save Discriminator loss after multi-step update
@@ -146,12 +153,15 @@ class TrainQGAN:
                 grad_g, expval_GD = self.generator_step(gen_w=gen_w, disc_w=disc_w)
 
                 # Apply optimizer step for Generator
-                gen_w.grad = grad_g
+                gen_w.grad = grad_g / 4.0
 
                 lr_g = 5.0 * lr_d_schedule(d_step)
                 opt_g.param_groups[0]["lr"] = lr_g
 
                 opt_g.step()
+
+                expvals_GD.append(expval_GD)
+                expvals_RD.append(expvals_RD[-1])  # Last RD value remains the same
             
             # Optional tracking: save Generator loss after multi-step update
 
@@ -165,10 +175,14 @@ class TrainQGAN:
             ))
 
             # Print progress every 5 iterations
-            if iteration % 20 == 0:
+            if iteration % 10 == 0:
                 print(f"Iteration {iteration:03d}", end="")
                 for label in range(self.real_data.num_classes):
                     print(f" | CE_{label}: {cross_entropies[-1][label]:.4f}", end="")
+                print("")
+                # Print expvals for monitoring
+                print(f"    Expval_RD: {expvals_RD[-1]:.4f}, Expval_GD: {expvals_GD[-1]:.4f}")
+                print(f"    Total Loss: {expvals_RD[-1] - expvals_GD[-1]:.4f}")
                 print("")
 
 
@@ -176,7 +190,9 @@ class TrainQGAN:
         result = TrainingResult(
             gen_params=gen_w.detach(),
             disc_params=disc_w.detach(),
-            cross_entropies=cross_entropies
+            cross_entropies=cross_entropies,
+            expvals_RD=expvals_RD,
+            expvals_GD=expvals_GD,
         )
         return result
 
