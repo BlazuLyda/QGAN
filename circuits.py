@@ -78,6 +78,58 @@ class Ansatz:
                     circ.rzz(params[param_idx], qubits[i], qubits[i+1])
                     param_idx += 1
 
+
+class EntanglingGeneratorAnsatz(Ansatz):
+
+    @staticmethod
+    def add_ansatz(
+        qubits,
+        n_layers: int,
+        circ: QuantumCircuit,
+        params,
+        bath_qubits=[],
+        data_qubits=[]
+    ):
+        """
+        Generator ansatz that enforces early bath-data entanglement.
+
+        Structure:
+        1. Fixed entangling prefix (bath → data)
+        2. Standard scalable ansatz over (bath + data)
+        """
+
+        if len(bath_qubits) == 0:
+            raise ValueError("At least one bath qubit is required")
+
+        if len(data_qubits) == 0:
+            raise ValueError("At least one data qubit is required")
+
+        # --- 1. Mandatory entangling prefix ---
+        #
+        # Each bath qubit controls one data qubit (round-robin)
+        #
+        for i, bq in enumerate(bath_qubits):
+            dq = data_qubits[i % len(data_qubits)]
+            circ.cx(bq, dq)
+
+        # --- 2. Standard ansatz on all generator qubits ---
+        #
+        # Important: we reuse the original Ansatz logic verbatim
+        #
+        expected_params = Ansatz.count_ansatz_params(len(qubits), n_layers)
+        if expected_params != len(params):
+            raise Exception(
+                f"Expected {expected_params} parameters, got {len(params)}"
+            )
+
+        Ansatz.add_ansatz(
+            qubits=qubits,
+            n_layers=n_layers,
+            circ=circ,
+            params=params,
+        )
+
+
 class QGANCircuits:
     """
     QGAN circuits consisting of a data source G(enerator)/R(eal) and D(iscriminator).
@@ -115,6 +167,7 @@ class QGANCircuits:
         self.real_source = real_source
         self.rng = np.random.default_rng(random)
 
+        # Qubit register sizes
         self.n_data = n_data_qubits
         self.n_label = n_label_qubits
         self.n_bath = n_bath_qubits
@@ -129,27 +182,27 @@ class QGANCircuits:
             "bath":    self.n_dec + self.n_label + self.n_data + self.n_label,
         }
 
-        # Generator: Acts on Label(m) + Data(n) + Entropy/Bath(k)
-        self.n_gen_qubits = self.n_label + self.n_data + self.n_bath
+        # Explicit list of qubit indexes corresponding to each qubit register
+        self.dec_qubit = [0] # Just the first qubit
+        self.label_d_qubits = list(range(self.offsets["label_d"], self.offsets["label_d"] + self.n_label))
+        self.data_qubits    = list(range(self.offsets["data"],    self.offsets["data"]    + self.n_data))
+        self.label_g_qubits = list(range(self.offsets["label_g"], self.offsets["label_g"] + self.n_label))
+        self.bath_qubits    = list(range(self.offsets["bath"],    self.offsets["bath"]    + self.n_bath))
 
-        label_g_qubits = list(range(self.offsets["label_g"], self.offsets["label_g"] + self.n_label))
-        data_qubits    = list(range(self.offsets["data"],    self.offsets["data"]    + self.n_data))
-        bath_qubits    = list(range(self.offsets["bath"],    self.offsets["bath"]    + self.n_bath))
-
-        # Map generator subcircuit qubits in the order [label, data, bath]
-        self.gen_qubits = label_g_qubits + data_qubits + bath_qubits
-
-        self.n_layers_gen = n_layers_gen
+        # Generator: Acts on Data(n) + Label(m) + Entropy/Bath(k)
+        self.gen_qubits = self.data_qubits + self.data_qubits + self.bath_qubits
+        self.n_gen_qubits = len(self.gen_qubits)
 
         # Discriminator: Acts on Decision(1) + Label(m) + Data(n)
-        self.n_disc_qubits = self.n_dec + self.n_label + self.n_data
-        self.disc_qubits = list(range(self.n_disc_qubits))
+        self.disc_qubits = self.dec_qubit + self.label_d_qubits + self.data_qubits
+        self.n_disc_qubits = len(self.disc_qubits)
+
+        # Ansatz layers for Generator and Discriminator
+        self.n_layers_gen = n_layers_gen
         self.n_layers_disc = n_layers_disc
 
         # --- Parameters ---
-        self.n_gen_params = count_conditional_gen_params(
-            self.n_label, self.n_data, self.n_bath, self.n_layers_gen
-        )
+        self.n_gen_params = Ansatz.count_ansatz_params(self.n_gen_qubits, n_layers_gen)
         self.gen_params = ParameterVector("g", self.n_gen_params) # Bindable parameters for Generator
 
         self.n_disc_params = Ansatz.count_ansatz_params(self.n_disc_qubits, n_layers_disc)
@@ -171,31 +224,34 @@ class QGANCircuits:
         # Measure Pauli on Decision qubit (Q0) and Data qubit
         self.measure_op_rd = double_qubit_op(
             total_qubits=self.n_RD_qubits, 
-            decision_qubit=0,
+            decision_qubit=self.dec_qubit[0],
             other_qubit=self.offsets["data"],
             lambda_ZZ=0.02,
             lambda_XX=0.02
         )
         self.measure_op_gd = double_qubit_op(
             total_qubits=self.n_GD_qubits, 
-            decision_qubit=0,
+            decision_qubit=self.dec_qubit[0],
             other_qubit=self.offsets["data"],
             lambda_ZZ=0.02,
             lambda_XX=0.02
         )
 
+        # Build circuit components
         self.gen_circuit = self._build_gen_ansatz()
         self.disc_circuit = self._build_disc_ansatz()
 
+
     def _build_gen_ansatz(self):
         circ = QuantumCircuit(self.n_gen_qubits)
-        add_conditional_gen_ansatz(
-            circ=circ,
-            n_label=self.n_label,
-            n_data=self.n_data,
-            n_bath=self.n_bath,
+        # Use special Ansatz extension for the generator
+        EntanglingGeneratorAnsatz.add_ansatz(
+            qubits=self.gen_qubits,
             n_layers=self.n_layers_gen,
+            circ=circ,
             params=self.gen_params,
+            bath_qubits=self.bath_qubits,
+            data_qubits=self.data_qubits
         )
         return circ
 
