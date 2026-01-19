@@ -158,6 +158,13 @@ class TrainQGAN:
                 print(f"    Total Loss: {expvals_RD[-1] - expvals_GD[-1]:.4f}")
                 print("")
 
+            # Print training checkpoint
+            if iteration % 100 == 0:
+                print(f"\n--- Training checkpoint (it={iteration}) ---")
+                print(f"cross-entropies: {cross_entropies}")
+                print(f"expvals_RD: {expvals_RD}")
+                print(f"expvals_GD: {expvals_GD}")
+
 
         # Return trained parameters and any tracked metrics
         result = TrainingResult(
