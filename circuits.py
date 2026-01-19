@@ -3,7 +3,7 @@ from qiskit.circuit import ParameterVector
 from qiskit.circuit.library import StatePreparation
 from qiskit.quantum_info import Statevector, DensityMatrix, partial_trace
 from data import QuantumDataSource
-from utils import avg_z_op, double_qubit_op
+from utils import MeasureOperators
 import numpy as np
 
 def count_conditional_gen_params(n_label: int, n_data: int, n_bath: int, n_layers: int) -> int:
@@ -213,28 +213,20 @@ class QGANCircuits:
         self.n_RD_qubits = self.n_disc_qubits
         self.n_GD_qubits = self.n_disc_qubits + self.n_label + self.n_bath
 
-        # # Measure Z on Decision qubit (Q0)
-        # self.measure_op_rd = avg_z_op(
-        #     total_qubits=self.n_disc_qubits, target_qubit=0
-        # )
-        # self.measure_op_gd = avg_z_op(
-        #     total_qubits=self.n_disc_qubits + self.n_label + self.n_bath, target_qubit=0
-        # )
-
-        # Measure Pauli on Decision qubit (Q0) and Data qubit
-        self.measure_op_rd = double_qubit_op(
+        # Use random Pauli measurement with correlation correction for both circuits
+        self.measure_op_rd = MeasureOperators.randomized_double_qubit_op(
             total_qubits=self.n_RD_qubits, 
             decision_qubit=self.dec_qubit[0],
             other_qubit=self.offsets["data"],
-            lambda_ZZ=0.02,
-            lambda_XX=0.02
+            lambda_corr=0.03,
+            rng=self.rng
         )
-        self.measure_op_gd = double_qubit_op(
+        self.measure_op_gd = MeasureOperators.randomized_double_qubit_op(
             total_qubits=self.n_GD_qubits, 
             decision_qubit=self.dec_qubit[0],
             other_qubit=self.offsets["data"],
-            lambda_ZZ=0.02,
-            lambda_XX=0.02
+            lambda_corr=0.03,
+            rng=self.rng
         )
 
         # Build circuit components
@@ -331,7 +323,7 @@ class QGANCircuits:
 
             # 5. Exact simulation
             state = Statevector.from_instruction(bound_circ)
-            expval = state.expectation_value(self.measure_op_rd)
+            expval = state.expectation_value(self.measure_op_rd())
 
             return expval.real
 
@@ -368,7 +360,7 @@ class QGANCircuits:
 
             # 5. Exact simulation
             state = Statevector.from_instruction(bound_circ)
-            expval = state.expectation_value(self.measure_op_gd)
+            expval = state.expectation_value(self.measure_op_gd())
 
             return expval.real
 
