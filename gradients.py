@@ -93,7 +93,7 @@ class Gradients:
         assert isinstance(calc_RD_expval, Callable)
 
         # Compute base bind expectation value
-        expval = calc_RD_expval(base_bind)
+        expval = calc_RD_expval(base_bind, print_circ=False)
 
         # Compute Discriminator gradients using Parameter Shift Rule
         grads = compute_parameter_shift_grads(
@@ -133,7 +133,7 @@ class Gradients:
         assert isinstance(calc_RD_expval, Callable)
 
         # Compute base bind expectation value
-        expval = calc_RD_expval(base_bind)
+        expval = calc_RD_expval(base_bind, print_circ=False)
 
         # Compute Discriminator gradients using Parameter Shift Rule
         grads = compute_parameter_shift_grads(

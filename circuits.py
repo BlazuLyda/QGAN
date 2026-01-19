@@ -1,9 +1,11 @@
+from typing import Any, Callable
+from matplotlib.pylab import qr
 from qiskit import QuantumCircuit
 from qiskit.circuit import ParameterVector
 from qiskit.circuit.library import StatePreparation
-from qiskit.quantum_info import Statevector, DensityMatrix, partial_trace
+from qiskit.quantum_info import Statevector, DensityMatrix, partial_trace, SparsePauliOp
 from data import QuantumDataSource
-from utils import avg_z_op
+from utils import avg_z_op, double_qubit_op
 import numpy as np
 
 class Ansatz:
@@ -41,6 +43,7 @@ class Ansatz:
                     circ.rzz(params[param_idx], qubits[i], qubits[i+1])
                     param_idx += 1
 
+
 class QGANCircuits:
     """
     QGAN circuits consisting of a data source G(enerator)/R(eal) and D(iscriminator).
@@ -69,6 +72,7 @@ class QGANCircuits:
             n_bath_qubits=1,
             n_layers_gen=2,
             n_layers_disc=4,
+            measure_op:Callable[..., SparsePauliOp]=avg_z_op,
             random:int|None=None
         ):
         """
@@ -115,11 +119,23 @@ class QGANCircuits:
         self.n_GD_qubits = self.n_disc_qubits + self.n_label + self.n_bath
 
         # Measure Z on Decision qubit (Q0)
-        self.measure_op_rd = avg_z_op(
-            total_qubits=self.n_disc_qubits, target_qubit=0
+        # self.measure_op_rd = measure_op(self.n_disc_qubits, 0)
+        # self.measure_op_gd = measure_op(self.n_disc_qubits + self.n_label + self.n_bath, 0)
+
+        # Measure Pauli on Decision qubit (Q0) and Data qubit
+        self.measure_op_rd = double_qubit_op(
+            total_qubits=self.n_RD_qubits, 
+            decision_qubit=0,
+            other_qubit=self.offsets["data"],
+            lambda_ZZ=0.02,
+            lambda_XX=0.02
         )
-        self.measure_op_gd = avg_z_op(
-            total_qubits=self.n_disc_qubits + self.n_label + self.n_bath, target_qubit=0
+        self.measure_op_gd = double_qubit_op(
+            total_qubits=self.n_GD_qubits, 
+            decision_qubit=0,
+            other_qubit=self.offsets["data"],
+            lambda_ZZ=0.02,
+            lambda_XX=0.02
         )
 
         self.gen_circuit = self._build_gen_ansatz()
@@ -177,6 +193,7 @@ class QGANCircuits:
         data_offset = self.offsets["data"]
         data_qubits = list(range(data_offset, data_offset + self.n_data))
         circ.append(prep, data_qubits)
+        return sample_state
 
     def prepare_RD_circuit(self, label: int, return_circ: bool = False):
         """
@@ -193,7 +210,9 @@ class QGANCircuits:
         self._prepare_label_register(circ, label)
 
         # 3. Data register (Real data)
-        self._prepare_real_data_register(circ, label)
+        sample_state = self._prepare_real_data_register(circ, label)
+
+        circ.barrier(list(range(self.n_RD_qubits)))
 
         # 4. Apply Discriminator (symbolic parameters)
         circ.compose(self.disc_circuit, inplace=True)
@@ -201,8 +220,12 @@ class QGANCircuits:
         if return_circ:
             return circ
 
-        def apply(binds):
+        def apply(binds, print_circ: bool = False):
             bound_circ = circ.assign_parameters(binds)
+            if print_circ:
+                print(f"\n--- RD Circuit (label: {label}) ---\n")
+                print(f"Sample state: {sample_state}\n")
+                print(bound_circ.draw(fold=-1))
 
             # 5. Exact simulation
             state = Statevector.from_instruction(bound_circ)
@@ -229,8 +252,12 @@ class QGANCircuits:
         # 3. Bath register (random noise)
         self._prepare_bath_register(circ)
 
+        circ.barrier(list(range(self.n_GD_qubits)))
+
         # 4. Apply Generator (symbolic parameters)
         circ.compose(self.gen_circuit, qubits=self.gen_qubits, inplace=True)
+
+        circ.barrier(list(range(self.n_GD_qubits)))
 
         # 4. Apply Discriminator (symbolic parameters)
         circ.compose(self.disc_circuit, qubits=self.disc_qubits, inplace=True)
@@ -238,8 +265,12 @@ class QGANCircuits:
         if return_circ:
             return circ
 
-        def apply(binds):
+        def apply(binds, print_circ: bool = False):
             bound_circ = circ.assign_parameters(binds)
+
+            if print_circ:
+                print(f"\n--- GD Circuit (label: {label}) ---\n")
+                print(bound_circ.draw(fold=-1))
 
             # 5. Exact simulation
             state = Statevector.from_instruction(bound_circ)
