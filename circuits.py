@@ -3,7 +3,7 @@ from qiskit.circuit import ParameterVector
 from qiskit.circuit.library import StatePreparation
 from qiskit.quantum_info import Statevector, DensityMatrix, partial_trace
 from data import QuantumDataSource
-from utils import avg_z_op
+from utils import avg_z_op, double_qubit_op
 import numpy as np
 
 def count_conditional_gen_params(n_label: int, n_data: int, n_bath: int, n_layers: int) -> int:
@@ -160,12 +160,28 @@ class QGANCircuits:
         self.n_RD_qubits = self.n_disc_qubits
         self.n_GD_qubits = self.n_disc_qubits + self.n_label + self.n_bath
 
-        # Measure Z on Decision qubit (Q0)
-        self.measure_op_rd = avg_z_op(
-            total_qubits=self.n_disc_qubits, target_qubit=0
+        # # Measure Z on Decision qubit (Q0)
+        # self.measure_op_rd = avg_z_op(
+        #     total_qubits=self.n_disc_qubits, target_qubit=0
+        # )
+        # self.measure_op_gd = avg_z_op(
+        #     total_qubits=self.n_disc_qubits + self.n_label + self.n_bath, target_qubit=0
+        # )
+
+        # Measure Pauli on Decision qubit (Q0) and Data qubit
+        self.measure_op_rd = double_qubit_op(
+            total_qubits=self.n_RD_qubits, 
+            decision_qubit=0,
+            other_qubit=self.offsets["data"],
+            lambda_ZZ=0.02,
+            lambda_XX=0.02
         )
-        self.measure_op_gd = avg_z_op(
-            total_qubits=self.n_disc_qubits + self.n_label + self.n_bath, target_qubit=0
+        self.measure_op_gd = double_qubit_op(
+            total_qubits=self.n_GD_qubits, 
+            decision_qubit=0,
+            other_qubit=self.offsets["data"],
+            lambda_ZZ=0.02,
+            lambda_XX=0.02
         )
 
         self.gen_circuit = self._build_gen_ansatz()
