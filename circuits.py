@@ -158,7 +158,8 @@ class QGANCircuits:
             n_bath_qubits=1,
             n_layers_gen=2,
             n_layers_disc=4,
-            random:int|None=None
+            random:int|None=None,
+            print_debug=False
         ):
         """
         Implementation of QuGAN with configurable depths.
@@ -173,7 +174,7 @@ class QGANCircuits:
         self.n_bath = n_bath_qubits
         self.n_dec = 1
 
-        # Offsets of the qubit registers
+        # Global Offsets of the qubit registers
         self.offsets = {
             "dec":     0,
             "label_d": self.n_dec,
@@ -183,14 +184,23 @@ class QGANCircuits:
         }
 
         # Explicit list of qubit indexes corresponding to each qubit register
+        # These are global so they should only be used on the full circuit
         self.dec_qubit = [0] # Just the first qubit
         self.label_d_qubits = list(range(self.offsets["label_d"], self.offsets["label_d"] + self.n_label))
         self.data_qubits    = list(range(self.offsets["data"],    self.offsets["data"]    + self.n_data))
         self.label_g_qubits = list(range(self.offsets["label_g"], self.offsets["label_g"] + self.n_label))
         self.bath_qubits    = list(range(self.offsets["bath"],    self.offsets["bath"]    + self.n_bath))
 
+        if print_debug:
+            print("Global qubit indexes:")
+            print(f"dec qubit: {self.dec_qubit}")
+            print(f"label d qubits: {self.label_d_qubits}")
+            print(f"data qubits: {self.data_qubits}")
+            print(f"label g qubits: {self.label_g_qubits}")
+            print(f"bath qubits: {self.bath_qubits}")
+
         # Generator: Acts on Data(n) + Label(m) + Entropy/Bath(k)
-        self.gen_qubits = self.data_qubits + self.data_qubits + self.bath_qubits
+        self.gen_qubits = self.data_qubits + self.label_g_qubits + self.bath_qubits
         self.n_gen_qubits = len(self.gen_qubits)
 
         # Discriminator: Acts on Decision(1) + Label(m) + Data(n)
@@ -236,14 +246,20 @@ class QGANCircuits:
 
     def _build_gen_ansatz(self):
         circ = QuantumCircuit(self.n_gen_qubits)
+
+        # Use local indexing for a partial circuit
+        relative_gen_qubits  = [i - self.offsets["data"] for i in self.gen_qubits]
+        relative_data_qubits = [i - self.offsets["data"] for i in self.data_qubits]
+        relative_bath_qubits = [i - self.offsets["data"] for i in self.bath_qubits]
+
         # Use special Ansatz extension for the generator
         EntanglingGeneratorAnsatz.add_ansatz(
-            qubits=self.gen_qubits,
+            qubits=relative_gen_qubits,
             n_layers=self.n_layers_gen,
             circ=circ,
             params=self.gen_params,
-            bath_qubits=self.bath_qubits,
-            data_qubits=self.data_qubits
+            bath_qubits=relative_bath_qubits,
+            data_qubits=relative_data_qubits
         )
         return circ
 
@@ -277,12 +293,17 @@ class QGANCircuits:
         """
         offset = self.offsets["bath"]
 
-        for q in range(self.n_bath):
-            theta = self.rng.uniform(0, np.pi)
-            phi = self.rng.uniform(0, 2 * np.pi)
+        # for q in range(self.n_bath):
+        #     theta = self.rng.uniform(0, np.pi)
+        #     phi = self.rng.uniform(0, 2 * np.pi)
 
-            circ.ry(theta, offset + q)
-            circ.rz(phi, offset + q)
+        #     circ.ry(theta, offset + q)
+        #     circ.rz(phi, offset + q)
+
+        for q in range(self.n_bath):
+            if self.rng.uniform(0, 1) > 0.5:
+                circ.x(offset + q)
+
 
     def _prepare_real_data_register(self, circ: QuantumCircuit, label: int):
         """
@@ -311,6 +332,8 @@ class QGANCircuits:
 
         # 3. Data register (Real data)
         self._prepare_real_data_register(circ, label)
+
+        circ.barrier()
 
         # 4. Apply Discriminator (symbolic parameters)
         circ.compose(self.disc_circuit, inplace=True)
@@ -346,8 +369,11 @@ class QGANCircuits:
         # 3. Bath register (random noise)
         self._prepare_bath_register(circ)
 
+        circ.barrier()
+
         # 4. Apply Generator (symbolic parameters)
         circ.compose(self.gen_circuit, qubits=self.gen_qubits, inplace=True)
+        circ.barrier()
 
         # 4. Apply Discriminator (symbolic parameters)
         circ.compose(self.disc_circuit, qubits=self.disc_qubits, inplace=True)
@@ -446,12 +472,16 @@ class GenCircuit:
         """
         offset = self.n_label + self.n_data
 
-        for q in range(self.n_bath):
-            theta = self.rng.uniform(0, np.pi)
-            phi = self.rng.uniform(0, 2 * np.pi)
+        # for q in range(self.n_bath):
+        #     theta = self.rng.uniform(0, np.pi)
+        #     phi = self.rng.uniform(0, 2 * np.pi)
 
-            circ.ry(theta, offset + q)
-            circ.rz(phi, offset + q)
+        #     circ.ry(theta, offset + q)
+        #     circ.rz(phi, offset + q)
+
+        for q in range(self.n_bath):
+            if self.rng.uniform(0, 1) > 0.5:
+                circ.x(offset + q)
 
     def trace_out_bath_and_label(self, state: Statevector) -> DensityMatrix:
         """

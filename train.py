@@ -81,11 +81,11 @@ class TrainQGAN:
         # Initialize Generator and Discriminator parameters
         # Generator: Initialize closer to 0 to preserve Label early on.
         gen_w = torch.nn.Parameter(
-            torch.tensor(np.random.uniform(-np.pi, np.pi, self.qgan.n_gen_params))
+            torch.tensor(np.random.uniform(-0.1, 0.1, self.qgan.n_gen_params))
         )
-        # Discriminator: Initialize widely [-pi, pi] to avoid barren plateaus.
+        # Discriminator: Initialize widely [-pi/2, pi/2] to avoid barren plateaus.
         disc_w = torch.nn.Parameter(
-            torch.tensor(np.random.uniform(-np.pi, np.pi, self.qgan.n_disc_params))
+            torch.tensor(np.random.uniform(-np.pi/2, np.pi/2, self.qgan.n_disc_params))
         )
 
         # Use Adam optimizers for both Generator and Discriminator
@@ -146,6 +146,13 @@ class TrainQGAN:
                 n_gen_samples_per_label=self.config.cross_entropy_samples,
                 eps=1e-12,
             ))
+
+            # Lower learning rates after iteration 200
+            if iteration == 150:
+                for g in opt_g.param_groups:
+                    g["lr"] *= 0.5
+                for g in opt_d.param_groups:
+                    g["lr"] *= 0.5
 
             # Print progress every 5 iterations
             if iteration % 10 == 0:
